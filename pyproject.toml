@@ -6,15 +6,19 @@ build-backend = "setuptools.build_meta"
 name = "ecommerce-dw"
 version = "0.1.0"
 description = "电商用户行为与订单离线数仓：五层建模（ODS/DIM/DWD/DWS/ADS） + 数据质量校验 + 幂等调度"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
-    "duckdb>=1.0",
-    "pandas>=2.0",
-    "numpy>=1.24",
+    "duckdb>=1.5",
+    "pandas>=3.0",
+    "numpy>=2.5",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=9.0"]
+# 只有跑倾斜对照实验的 B 部分（真 Spark）才需要，约 430MB + 一个 Java 运行时：
+#   pip install pyspark && python spark/skew_experiment.py --spark
+# 注意 Windows 下项目路径含中文时 spark-submit.cmd 会传坏 classpath，规避办法见该文件头部注释。
+spark = ["pyspark>=4.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

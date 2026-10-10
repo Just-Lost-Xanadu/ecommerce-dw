@@ -92,7 +92,7 @@ class SkewResult:
 
     def format(self) -> str:
         return "\n".join([
-            "倾斜量化（按 user_id 聚合时的分组规模分布）",
+            "倾斜量化（按 sku_id 聚合时的分组规模分布）",
             f"  参与聚合的订单行数    {self.total_rows:,}",
             (
                 f"  热销 SKU {self.hot_sku}   {self.hot_sku_rows:,} 行"
@@ -118,10 +118,10 @@ def skew_stats(
 
     total, hot, groups, mx, p50 = con.execute(f"""
         WITH base AS (
-            SELECT user_id FROM dwd_order_detail
+            SELECT sku_id FROM dwd_order_detail
             WHERE dt BETWEEN DATE '{start}' AND DATE '{end}' AND is_valid AND is_paid
         ), g AS (
-            SELECT user_id, count(*) AS n FROM base GROUP BY user_id
+            SELECT sku_id, count(*) AS n FROM base GROUP BY sku_id
         )
         SELECT
             (SELECT count(*) FROM base),
