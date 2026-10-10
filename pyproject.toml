@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ecommerce-dw"
+version = "0.1.0"
+description = "电商用户行为与订单离线数仓：四层建模 + 数据质量校验 + 幂等调度"
+requires-python = ">=3.10"
+dependencies = [
+    "duckdb>=1.0",
+    "pandas>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
