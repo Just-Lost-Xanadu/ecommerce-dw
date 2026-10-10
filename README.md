@@ -240,7 +240,7 @@ python -m dw.cli recon
 | DWS | `dws_traffic_user_1d` / `dws_trade_user_1d` | 276,125 / 129,864 |
 | ADS | `ads_daily_metrics` / `ads_gmv_category_1d` / `ads_funnel_1d` | 14 / 98 / 42 |
 
-质量报告 **10/11 通过**，唯一失败的是 `source_days_within_boundary`（命中 25 个超前分区，告警级、不阻断下游）。
+质量报告 **10/12 通过**，失败两条且都是告警级、不阻断下游：`source_days_within_boundary`（命中 25 个超前分区）与 `funnel_stage_monotonic`（8 天漏斗不单调）。
 
 > 关于这张表要提醒一句（也是这个项目踩过的真实坑）：**它必须是「一次干净跑批」的数字**。
 > 如果表里同时躺着两代数据（例如换了结算日重新造数后重跑，而窗口不重叠），
@@ -287,7 +287,7 @@ ecommerce-dw/
 │   └── export_dashboard.py   # 离线 HTML 看板
 ├── sql/                      # 全部建表与加工 SQL（含设计理由注释）
 ├── spark/skew_experiment.py  # 倾斜对照实验（可选，见该文件说明）
-├── tests/                    # 48 项测试
+├── tests/                    # 51 项测试
 ├── docs/                     # 指标口径 / 数据字典
 ├── dashboard/out/report.html # 看板产物（可离线打开）
 └── LICENSE                   # MIT
@@ -298,7 +298,7 @@ ecommerce-dw/
 ## 九、测试
 
 ```bash
-python -m pytest -q          # 48 passed
+python -m pytest -q          # 51 passed
 ```
 
 | 文件 | 覆盖 |

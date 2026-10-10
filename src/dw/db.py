@@ -18,13 +18,68 @@ import duckdb
 
 from dw import config
 
-
 # ---- 数仓（DuckDB） --------------------------------------------------------
+# 锁冲突时给出的可操作指引。抽成常量是为了让测试能直接断言"指引里必须包含
+# 可执行的步骤"，而不是去匹配一大段文案。
+_LOCK_HINT = """\
+这几乎总是因为**上一轮跑批被中断后，还有子进程占着这个文件**
+（DuckDB 单文件库同一时刻只允许一个写连接）。
+注意：DuckDB 报出的 PID **可能是已经退出的进程**，所以不要只照着 PID 去找——照了也找不到。
+
+按顺序做：
+  1) 先看有没有残留进程，有就结束掉：
+       Get-Process python -ErrorAction SilentlyContinue
+       Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force
+  2) 确认没有别的地方开着这个库：另一个终端、DB 客户端、IDE 的数据库插件。
+  3) 都清了还报同样的错，说明锁没释放干净：删掉同目录下的
+       <库名>.duckdb.wal 与 <库名>.duckdb.tmp
+     再重试。（它们只是未落盘的中间产物，但**如果上次跑批是被强杀的，
+     保险做法是清库后重跑一次**，别直接接着用可能不完整的数仓。）
+  4) 想彻底绕开：换一个数仓路径，例如
+       set DW_WAREHOUSE=data\\warehouse2.duckdb
+"""
+
+
+def _connect_error(path: Path, exc: BaseException) -> str:
+    """把底层连接异常翻译成"接下来该做什么"。
+
+    这里**不能用 `"lock" in text` 这种子串判断**：`blocked` / `unlocked` 之类
+    同形词会误命中，于是把"路径不存在"这类问题也说成"残留进程占着库"，
+    排查方向直接被带偏。所以只认 DuckDB 实际会打出的那几句短语。
+    """
+    text = str(exc)
+    low = text.lower()
+    looks_like_lock = any(
+        phrase in low
+        for phrase in (
+            "conflicting lock",
+            "could not set lock",
+            "already open in",
+            "file is already open",
+        )
+    )
+    head = f"无法打开数仓文件：{path}\n底层报错：{text}\n\n"
+    if looks_like_lock:
+        return head + _LOCK_HINT
+    return head + (
+        "这不像锁冲突。请检查：路径是否存在、当前用户对该目录有没有写权限、"
+        "磁盘是否已满，以及文件是否被别的程序（杀毒、同步盘）占用。"
+    )
+
+
 def connect(db_path: Path | None = None) -> duckdb.DuckDBPyConnection:
-    """打开数仓连接。首次调用会自动创建目录与文件。"""
+    """打开数仓连接。首次调用会自动创建目录与文件。
+
+    被中断的跑批会留下持锁的子进程，之后每个命令都失败；而 DuckDB 的原始报错只说
+    "File is already open in python.exe (PID xxx)" 且 **PID 往往是死的**——
+    照着它排查会白费时间。所以这里统一抛 `RuntimeError` 并附上可操作的步骤。
+    """
     path = Path(db_path or config.WAREHOUSE_DB)
     path.parent.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect(str(path))
+    try:
+        con = duckdb.connect(str(path))
+    except (duckdb.Error, OSError) as exc:
+        raise RuntimeError(_connect_error(path, exc)) from exc
     # 让 DuckDB 的字符串比较/排序按大小写不敏感语义走，
     # 避免中文列值排序结果随环境（locale）不同而变化。
     con.execute("SET default_collation = 'nocase'")
