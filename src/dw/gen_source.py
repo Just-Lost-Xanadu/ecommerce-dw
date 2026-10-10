@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 from pathlib import Path
 
 import numpy as np
@@ -28,8 +27,14 @@ import pandas as pd
 
 from dw import config
 from dw.config import (
-    HOT_CATEGORY, HOT_SKU_ID, HOT_SKU_SHARE, N_DAYS, N_LOGS,
-    N_ORDERS, N_SKUS, N_USERS,
+    HOT_CATEGORY,
+    HOT_SKU_ID,
+    HOT_SKU_SHARE,
+    N_DAYS,
+    N_LOGS,
+    N_ORDERS,
+    N_SKUS,
+    N_USERS,
 )
 
 # 类目与价格区间（价格固定，避免"商品改价导致历史订单口径漂移"这种额外复杂度）
@@ -303,17 +308,17 @@ def gen_order(
     )
     dwd_aligned = ordered.query("order_status == 'paid'").query("amount == amount").query("amount > 0")
 
-    stats["clean_orders"] = int(len(dwd_aligned))
+    stats["clean_orders"] = len(dwd_aligned)
     # 与 DWS/ADS 一样收敛到分：不然对账时会出现"差 1e-9 元"这种噪声差异，
     # 让人误以为链路有问题（实测踩过：0.079% 的差异率全部来自这种末位误差）。
     stats["clean_gmv"] = round(float(dwd_aligned["amount"].sum()), 2)
     stats["settle_date"] = today.strftime("%Y-%m-%d")
     # 源表直算口径：不去重、不过滤退款与无效金额——用来做"清洗前后"的对照
     raw = df.query("amount == amount")
-    stats["raw_orders"] = int(len(df))
+    stats["raw_orders"] = len(df)
     stats["raw_gmv"] = float(raw["amount"].sum())
     stats["refund_gmv"] = float(df.loc[df["order_status"] == "refunded", "amount"].sum())
-    stats["raw_rows"] = int(len(df))
+    stats["raw_rows"] = len(df)
     return df, stats
 
 
@@ -345,7 +350,7 @@ def gen_user_log(
         }
     )
 
-    stats: dict[str, int] = {"raw_rows": int(len(df))}
+    stats: dict[str, int] = {"raw_rows": len(df)}
     extra: list[pd.DataFrame] = []
 
     # 脏 7：user_id 为空的日志
@@ -369,7 +374,7 @@ def gen_user_log(
     if extra:
         df = pd.concat([df, *extra], ignore_index=True)
     df = df.sample(frac=1.0, random_state=20261005).reset_index(drop=True)
-    stats["raw_rows"] = int(len(df))
+    stats["raw_rows"] = len(df)
     return df, stats
 
 
@@ -417,7 +422,7 @@ _SCALE = 1.0
 
 def use_scale(scale: float) -> None:
     """设置全局缩放系数（测试与小样本演示用）。"""
-    global _SCALE  # noqa: PLW0603
+    global _SCALE
     _SCALE = max(0.0001, float(scale))
 
 
@@ -471,10 +476,10 @@ def generate(seed: int = 20261005, out_dir: Path | None = None, scale: float = 1
         # 结算日由 gen_order 决定（未来日期注入会把基线整体前推），不能写死常量
         "settle_date": order_stats["settle_date"],
         "rows": {
-            "sku": int(len(sku)),
-            "user": int(len(user)),
-            "order": int(len(order)),
-            "user_log": int(len(log)),
+            "sku": len(sku),
+            "user": len(user),
+            "order": len(order),
+            "user_log": len(log),
         },
         "partitions": {
             "order_dt_files": n_order_parts,

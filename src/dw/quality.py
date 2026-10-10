@@ -6,6 +6,9 @@
 三条设计原则：
 1. **每条规则都有真靶子**：造数脚本注入了 9 类脏数据，规则必须能抓到它们。
    只写规则不验证规则，等于没写（`tests/test_quality.py` 把这件事锁住）。
+   ⚠️ 覆盖缺口如实说明：**late_arrival（迟到日志）目前没有任何规则负责**——
+   它们的日期落在统计窗口之外，ODS 按窗口加载，根本进不了数仓，
+   仓库内的规则看不到；只在源文件层面由测试守着。
 2. **每条规则只报实际触发的量**：不要笼统地说"数据有问题"，
    要说清"哪条规则、实际值多少、阈值多少、影响多少行"。
 3. **阻断要分级**：主键重复、参照完整性断裂这类问题必须阻断下游；
@@ -35,9 +38,12 @@ class RuleResult:
     blocking: bool
     detail: str
     lower_is_better: bool = False   # 有些指标是"越小越好"（剔行率、孤儿率），展示方向要反向
+    skipped: bool = False           # 该规则对本窗口不适用（如只有 1 天，算不了日环比）
 
     @property
     def status_cn(self) -> str:
+        if self.skipped:
+            return "不适用"
         return "通过" if self.passed else "失败"
 
     @property
@@ -135,20 +141,36 @@ def run_quality(
         "有效订单必须有 user_id，否则无法归属到人",
     )
 
-    # ---- 3. 值域：有效订单金额必须为正 ----
+    # ---- 3. 值域：不允许出现「既被判为有效、金额又非正」的行 ----
+    #
+    # 旧口径是 `count(*) FILTER (WHERE amount > 0) / count(*) ... AND is_valid`，
+    # 而 DWD 的 is_valid 定义就是 `reject_reason IS NULL`，reject_reason 里又含
+    # `WHEN amount <= 0 THEN 'amount_not_positive'` —— **is_valid 已经蕴含
+    # amount > 0**，所以那个比值恒等于 1.0。一条永远不会失败的阻断级规则，
+    # 等于没有这条规则（这正是本项目最该避免的那类假安全感）。
+    #
+    # 新口径直接检查 DWD 的**判定结论**与金额是否自洽：
+    #     合规行 = NOT (is_valid AND 金额非正)
+    # 这样一旦 sql/dwd_order_detail.sql 的 CASE 分支被改坏，它立刻变红：
+    #   · 把 `amount <= 0` 写成 `amount < 0` → amount = 0 的行混成有效行；
+    #   · 整个金额分支被删掉 → 负数金额的行变成有效行进入 GMV。
+    # 注意它**不把「被正确剔除的负数行」算成违规**——那些行 is_valid = false，
+    # 属于清洗正常的产物，不是这条规则要报的问题。
     add(
         "dwd", "positive_amount", "dwd_order_detail",
         _scalar(con, f"""
             WITH d AS (
                 SELECT count(*) AS n,
-                       count(*) FILTER (WHERE amount > 0) AS ok
+                       count(*) FILTER (
+                           WHERE NOT (is_valid AND (amount IS NULL OR amount <= 0))
+                       ) AS ok
                 FROM dwd_order_detail
-                WHERE dt BETWEEN DATE '{start}' AND DATE '{end}' AND is_valid
+                WHERE dt BETWEEN DATE '{start}' AND DATE '{end}'
             )
             SELECT CASE WHEN n > 0 THEN ok * 1.0 / n ELSE 1.0 END, n - ok FROM d
         """),
         th["value_range_rate"], True,
-        "进入指标的订单金额必须为正数",
+        "没有任何一行可以既被判为有效、金额又非正（is_valid 与 amount 必须自洽）。旧口径在 is_valid 行上算 amount > 0，是恒真表达式，已改为一致性校验",
     )
 
     # ---- 4. 参照完整性（DWD 层）：有效订单的孤儿商品率 ----
@@ -165,8 +187,9 @@ def run_quality(
             SELECT CASE WHEN n > 0 THEN orphan * 1.0 / n ELSE 0.0 END, orphan FROM d
         """),
         th["referential_dwd_rate"], False,
-        "孤儿商品在 ADS 归入「未知类目」，不会让 GMV 静默消失——"
-        "所以这是**可控的告警项而非阻断项**，限额监控即可",
+        f"孤儿商品在 ADS 归入「未知类目」，不会让 GMV 静默消失——"
+        f"所以这是**可控的告警项而非阻断项**；孤儿率上限 "
+        f"{th['referential_dwd_rate']:.2%}（越小越好）",
         lower_is_better=True,
     )
 
@@ -184,7 +207,11 @@ def run_quality(
             SELECT CASE WHEN n > 0 THEN orphan * 1.0 / n ELSE 0.0 END, orphan FROM d
         """),
         th["referential_ods_rate"], False,
-        "源侧孤儿率用于对比：与 DWD 侧的差值说明清洗挡住了多少",
+        f"源侧孤儿率上限 {th['referential_ods_rate']:.2%}（越小越好）。"
+        "⚠️ 注意：孤儿行在 DWD **不会**被剔除（它的 is_valid 仍为 true，"
+        "只是关联不上维表），所以本规则的孤儿数与 orphan_sku_rate_dwd "
+        "**当前恒等**，两者的差值暂无信息量；等 DWD 开始剔除孤儿行，"
+        "它才会变得有意义",
         lower_is_better=True,
     )
 
@@ -209,11 +236,23 @@ def run_quality(
     )
 
     # ---- 7. 时效性：已加载分区里的事件日期必须落在统计窗口内 ----
-    # 说明：造数时注入的"迟到数据"（日期落在窗口之外）**不会**被 ODS 加载进来——
-    # 因为 ODS 是按 `dt` 分区加载的，那些行属于窗口外的分区。
-    # 所以这条规则校验的是另一个更实际的问题：**加载进来的分区里有没有日期错位**
-    # （分区标着 09-25、事件日期却是 10-03，这类错位在真实系统里很常见）。
-    # 要监控"被挡在窗口外的迟到数据量"，看造数脚本的 late_arrival 注入数与对账报告。
+    #
+    # ⚠️ **这条规则在当前数据模型下恒真**，如实说明原因：
+    #   sql/ods_user_log.sql 的加载语句是
+    #       WHERE TRY_CAST(log_date AS DATE) = DATE {dt}
+    #   且 dt := TRY_CAST(log_date AS DATE) —— 也就是说 **分区键 dt 就是由
+    #   log_date 派生出来的**，两者在结构上不可能不一致；再按 `dt BETWEEN 窗口`
+    #   过滤，log_date 必然落在窗口内，比值恒为 1.0（实测影响行数 0）。
+    #
+    #   保留它的理由：它是一个**接入层变更后的守卫**。真实数仓里 ODS 常常
+    #   按「文件所在的分区目录名」落 dt、事件日期另取一列，那时两者就可能错位
+    #   （分区标着 09-25、事件日期却是 10-03），这条规则会立刻生效。
+    #   要让它今天就有意义，ODS 必须同时保留「分区日期」和「事件日期」两个字段。
+    #
+    #   另外，迟到数据（late_arrival 注入的 600 行）落在窗口**之外**的分区文件里，
+    #   ODS 按窗口加载，它们根本进不来——这是同一类"校验点选错位置"的盲区，
+    #   由 tests/test_quality.py::test_late_arrival_stays_out_of_window 在
+    #   源文件层面守着。
     add(
         "ods", "event_date_in_window", "ods_user_log",
         _scalar(con, f"""
@@ -230,7 +269,8 @@ def run_quality(
                    out_of_window FROM d
         """),
         th["timeliness_rate"], False,
-        "分区日期与事件日期必须一致；不一致说明上游写入时错分了分区",
+        "当前 ODS 的 dt 由 log_date 派生，本规则**结构上恒真**（不构成有效防护）；"
+        "保留作为接入层改为「按文件分区名落 dt」之后的守卫",
     )
 
     # ---- 8. 值域：行为事件的枚举合法 ----
@@ -249,32 +289,73 @@ def run_quality(
         "漏斗依赖 event 取值，出现新枚举必须先纳入口径",
     )
 
-    # ---- 9. 波动监控：DWS 交易汇总的日环比 ----
-    add(
-        "dws", "gmv_day_over_day", "dws_trade_user_1d",
-        _scalar(con, f"""
-            WITH daily AS (
-                SELECT dt, sum(pay_amount) AS gmv
-                FROM dws_trade_user_1d
-                WHERE dt BETWEEN DATE '{start}' AND DATE '{end}'
-                GROUP BY dt
-            ), pairs AS (
-                SELECT dt, gmv, lag(gmv) OVER (ORDER BY dt) AS prev FROM daily
-            ), bad AS (
-                SELECT count(*) AS n
-                FROM pairs
+    # ---- 9. 波动监控：逐日 GMV 的环比 ----
+    #
+    # 口径：actual = **超限的天数**（单日 GMV 环比超过 ±gmv_volatility），
+    #       threshold = 允许的超限天数上限 gmv_volatility_days_max（默认 0），
+    #       方向「越小越好」。默认语义就是注释里那句话：
+    #       **任何一天环比超过 ±50% 都要人工确认**。
+    #
+    # 旧写法有两个问题：
+    #   ① 把 actual 写成合规率 `1 - bad/tot`、阈值写成 `1 - 0.5 = 0.5`，
+    #      含义变成"超限天数不超过一半就算通过"，比注释松得多；
+    #   ② 窗口只有 1 天时（`run --limit 1`）没有可比的"前一天"，tot = 0，
+    #      旧写法直接返回 1.0「通过」——一条在日批模式下完全失效的监控。
+    #      现在这种情况显式标为 **skipped（不适用）**，不再伪装成通过。
+    #
+    # 还有一个**结构性问题**顺手修掉了：质量门禁跑在 dws **之前**
+    # （config.LAYERS 里 quality 在 dws 前，这是刻意的——脏数据不该流进指标层），
+    # 所以这条规则**不可能**读到本轮刚算出来的 dws_trade_user_1d：
+    # 首次跑批时它读的是空表（旧写法恒返回 1.0 通过），
+    # 后续跑批时读的是**上一轮的旧数据**——一个永远慢一拍、
+    # 却看起来一直在工作的监控。改成直接读 DWD 明细后，
+    # 它算的就是本轮的真实数字（与 dws_trade_user_1d 的 pay_amount 同口径，
+    # 只是没做逐用户的 ROUND）。
+    bad_days, comparable_pairs = con.execute(f"""
+        WITH daily AS (
+            SELECT dt, sum(amount) AS gmv
+            FROM dwd_order_detail
+            WHERE dt BETWEEN DATE '{start}' AND DATE '{end}'
+              AND is_valid AND is_paid
+            GROUP BY dt
+        ), pairs AS (
+            SELECT dt, gmv, lag(gmv) OVER (ORDER BY dt) AS prev FROM daily
+        )
+        SELECT
+            count(*) FILTER (
                 WHERE prev IS NOT NULL AND prev > 0
                   AND abs(gmv - prev) * 1.0 / prev > {th['gmv_volatility']}
-            ), tot AS (SELECT count(*) AS n FROM pairs WHERE prev IS NOT NULL)
-            SELECT CASE WHEN (SELECT n FROM tot) > 0
-                        THEN 1.0 - (SELECT n FROM bad) * 1.0 / (SELECT n FROM tot)
-                        ELSE 1.0 END,
-                   (SELECT n FROM bad)
-        """),
-        # 波动规则本身是"越小越好"的监控项，这里用"合规率"表达：日环比超限的天数占比要低
-        1.0 - th["gmv_volatility"], False,
-        "GMV 单日环比超过 ±50% 需要人工确认（大促、事故、口径变更）",
-    )
+            ) AS bad_days,
+            count(*) FILTER (WHERE prev IS NOT NULL AND prev > 0) AS comparable_pairs
+        FROM pairs
+    """).fetchone()
+    bad_days = int(bad_days or 0)
+    comparable_pairs = int(comparable_pairs or 0)
+    if comparable_pairs == 0:
+        results.append(
+            RuleResult(
+                layer="dwd", rule="gmv_day_over_day", table="dwd_order_detail",
+                passed=True, actual=0.0,
+                threshold=float(th["gmv_volatility_days_max"]),
+                affected_rows=0, blocking=False,
+                detail="窗口内没有可比的前一日（只有 1 天或数据不足），本规则不适用",
+                lower_is_better=True, skipped=True,
+            )
+        )
+    else:
+        results.append(
+            RuleResult(
+                layer="dwd", rule="gmv_day_over_day", table="dwd_order_detail",
+                passed=bad_days <= th["gmv_volatility_days_max"],
+                actual=float(bad_days),
+                threshold=float(th["gmv_volatility_days_max"]),
+                affected_rows=bad_days, blocking=False,
+                detail=f"GMV 单日环比超过 ±{th['gmv_volatility']:.0%} 的天数"
+                       f"（共 {comparable_pairs} 个可比日）；"
+                       "超限即需人工确认（大促、事故、口径变更）",
+                lower_is_better=True,
+            )
+        )
 
     # ---- 10. 剔行率：DWD 把多少比例的数据判为无效（越小越好）----
     add(
@@ -322,6 +403,46 @@ def run_quality(
         )
     )
 
+    # ---- 12. 漏斗单调性：后一阶段的人数不得超过前一阶段 ----
+    #
+    # 为什么需要它：漏斗的"加购→下单"转化率**可能大于 100%**。
+    # 实测本项目的造数数据（2026-10-21）：浏览 19,730 → 加购 10,355 →
+    # **下单 10,428**，下单人数比加购还多。根因是造数时每个事件独立随机抽取
+    # （gen_source.FUNNEL_EVENTS），用户可以只 buy 不 cart，不构成行为序列。
+    #
+    # 这条规则**在当前数据上就会失败**，这正是它的价值——它是一条"活靶子"，
+    # 证明规则真的会红（对比那几条恒真的规则，它们永远给不出这个信号）。
+    # 它是告警级（blocking=False）：漏斗不单调说明口径或造数需要修，
+    # 但不该让整条链路停下来（否则就变成"门禁天天拦"，告警会被无视）。
+    add(
+        "dwd", "funnel_stage_monotonic", "dwd_page_log",
+        _scalar(con, f"""
+            WITH per_day AS (
+                SELECT
+                    dt,
+                    count(DISTINCT user_id) AS view_users,
+                    count(DISTINCT user_id) FILTER (WHERE event = 'cart') AS cart_users,
+                    count(DISTINCT user_id) FILTER (WHERE event = 'buy')  AS buy_users
+                FROM dwd_page_log
+                WHERE dt BETWEEN DATE '{start}' AND DATE '{end}'
+                GROUP BY dt
+            )
+            SELECT
+                CASE WHEN count(*) > 0
+                     THEN count(*) FILTER (WHERE cart_users <= view_users
+                                             AND buy_users <= cart_users)
+                          * 1.0 / count(*)
+                     ELSE 1.0 END,
+                count(*) FILTER (WHERE cart_users > view_users
+                                   OR buy_users > cart_users)
+            FROM per_day
+        """),
+        1.0, False,
+        "漏斗各阶段人数必须单调不增（浏览 ≥ 加购 ≥ 下单）。"
+        "当前造数数据里会出现 buy > cart（转化率 > 100%），"
+        "说明事件是独立随机的、不构成行为序列——这是数据口径问题，不是链路 bug",
+    )
+
     return results
 
 
@@ -338,14 +459,16 @@ def format_report(results: list[RuleResult]) -> str:
     所以这里显式打出方向符，避免读的人搞反（这个坑自己也踩过一次）。
     """
     lines = [
-        f"{'规则':<24}{'层':<5}{'结果':<5}{'实际':>10}{'方向':>4}{'阈值':>9}"
-        f"{'影响行数':>10}  阻断",
-        "-" * 86,
+        (
+            f"{'规则':<30}{'层':<6}{'结果':<7}{'实际':>10}{'方向':>4}{'阈值':>10}"
+            f"{'影响行数':>10}  阻断"
+        ),
+        "-" * 96,
     ]
     for r in results:
         lines.append(
-            f"{r.rule:<24}{r.layer:<5}{r.status_cn:<5}"
-            f"{r.actual:>10.4f}{r.direction:>4}{r.threshold:>9.4f}"
+            f"{r.rule:<30}{r.layer:<6}{r.status_cn:<7}"
+            f"{r.actual:>10.4f}{r.direction:>4}{r.threshold:>10.4f}"
             f"{r.affected_rows:>10,}"
             f"  {'是' if r.blocking else '否'}"
         )

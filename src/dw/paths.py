@@ -97,26 +97,6 @@ def render(name: str, **params: object) -> str:
     return body.format(**rendered)
 
 
-def render_statements(name: str, **params: object) -> list[str]:
-    """把模板按 `;` 拆成多条语句（跳过空段和纯注释段）。
-
-    为什么需要：DuckDB 的 `execute()` 一次只接受一条语句，
-    而一个模板里通常包含"建表 + 删分区 + 插入 + 审计"多条。
-    """
-    body = render(name, **params)
-    out: list[str] = []
-    for chunk in body.split(";"):
-        stripped = chunk.strip()
-        if not stripped:
-            continue
-        # 整段都是注释（以 -- 开头）就跳过
-        lines = [ln for ln in stripped.splitlines() if ln.strip() and not ln.strip().startswith("--")]
-        if not lines:
-            continue
-        out.append(stripped)
-    return out
-
-
 def _strip_leading_comments(chunk: str) -> str:
     """剥掉一段 SQL 开头的注释行（模板里 CREATE 前面通常有大段说明）。"""
     lines = chunk.splitlines()
@@ -143,12 +123,19 @@ def create_tables(con, *names: str) -> None:
                 con.execute(body)
 
 
-# 全部需要建的表（模板名 -> 说明），跑批前统一建一次
+# 全部需要建的表（模板名），跑批前统一建一次。
+# ⚠️ 这里的每一张表，它的 CREATE TABLE 都必须能在对应的 sql/*.sql 模板里找到——
+# 不再单独维护一份"辅助表 DDL"。历史上 dwd_order_reject_audit 和 dim_date 的
+# 建表语句各写了两份（一份在模板里、一份在这里），改了一处漏了另一处不会有任何
+# 报错，只会让两张表结构悄悄分叉。现在只有一份真相：sql 模板。
+#   · dim_date 的建表在 sql/dim_date.sql
+#   · dwd_order_reject_audit 的建表在 sql/dwd_order_detail.sql（与它的 INSERT 同处）
 ALL_TABLES: tuple[str, ...] = (
     "ods_order_info",
     "ods_user_log",
     "dim_sku",
     "dim_user",
+    "dim_date",
     "dwd_order_detail",
     "dwd_page_log",
     "dws_traffic_user_1d",
@@ -158,21 +145,7 @@ ALL_TABLES: tuple[str, ...] = (
     "ads_funnel_1d",
 )
 
-# 模板里没有单独文件、属于辅助表的建表语句
-EXTRA_DDL: tuple[str, ...] = (
-    # DWD 的剔除审计表：把"剔了多少、为什么剔"落下来，供质量报告与对账使用
-    "CREATE TABLE IF NOT EXISTS dwd_order_reject_audit ("
-    "  dt DATE, reject_reason VARCHAR, rows_rejected BIGINT,"
-    "  _batch_id VARCHAR, PRIMARY KEY (dt, reject_reason))",
-    # 日期维度
-    "CREATE TABLE IF NOT EXISTS dim_date ("
-    "  date_key DATE PRIMARY KEY, year INTEGER, month INTEGER, day INTEGER,"
-    "  weekday INTEGER, weekday_cn VARCHAR, is_weekend BOOLEAN)",
-)
-
 
 def ensure_schema(con) -> None:
     """一次性保证所有表结构存在。跑批的第一步调用，重复执行无副作用。"""
     create_tables(con, *ALL_TABLES)
-    for ddl in EXTRA_DDL:
-        con.execute(ddl)

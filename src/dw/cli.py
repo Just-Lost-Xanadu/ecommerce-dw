@@ -3,6 +3,8 @@
     python -m dw.cli gen        # 生成源数据（含脏数据注入）
     python -m dw.cli run        # 跑完整链路（含质量门禁与看板）
     python -m dw.cli run --limit 1        # 只跑窗口内最后一天（模拟 T+1 日批）
+    python -m dw.cli run --no-prune       # 全窗口跑批但不清理窗口外的历史分区
+    python -m dw.cli run --prune          # 强制清理窗口外的历史分区（幽灵分区）
     python -m dw.cli quality    # 只看质量报告
     python -m dw.cli recon      # 对账 + 倾斜量化（两个技术难点的证据）
     python -m dw.cli tables     # 列出数仓所有表及行数
@@ -49,6 +51,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         window_start=start, window_end=end,
         force=args.force, with_quality=not args.no_quality,
         dashboard=not args.no_dashboard,
+        # None = 自动：全窗口跑批才清理窗口外的历史分区，补数场景不清理
+        prune_out_of_window=args.prune,
     )
     if result.blocked:
         return 2
@@ -145,6 +149,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true", help="忽略质量门禁继续跑（会留痕）")
     p.add_argument("--no-quality", action="store_true", help="跳过质量校验")
     p.add_argument("--no-dashboard", action="store_true", help="跳过看板生成")
+    p.add_argument("--prune", dest="prune", action="store_true", default=None,
+                   help="强制清理窗口外的历史分区（幽灵分区）")
+    p.add_argument("--no-prune", dest="prune", action="store_false",
+                   help="不清理窗口外的历史分区（补数 / T+1 日批场景）")
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("quality", help="只输出质量报告")

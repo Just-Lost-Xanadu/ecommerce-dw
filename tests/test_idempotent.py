@@ -87,6 +87,37 @@ def test_partial_window_rerun_keeps_other_days(iso_project) -> None:
         assert before[name] == after[name], f"只重跑最后一天，但 {name} 内容发生了变化"
 
 
+def test_full_window_run_prunes_ghost_partitions(prune_probe) -> None:
+    """全窗口跑批必须清掉"不属于本窗口"的历史分区（幽灵分区）。
+
+    这个坑是真实存在的：ODS 的幂等是「按 dt 分区先删后插」，它只能保证
+    「这一天不会被写两遍」，**完全无法阻止别的窗口留下的分区躺在表里**。
+    换个结算日重新造数后重跑，新窗口和旧窗口的日期不重叠，于是 ods_order_info
+    里会同时存在两代数据（实测 181,400 × 2 = 362,800 行、两个 _batch_id），
+    而质量规则和对账都带 `dt BETWEEN 窗口` 过滤，**完全看不见它们**。
+
+    测试做法：跑窗口 A（默认结算日那一批），再把结算日整体推后、重新造数，
+    跑窗口 B（两窗口不重叠），然后断言窗口 A 的分区已被清干净。
+    """
+    assert prune_probe["disjoint"], (
+        f"前置条件不成立：窗口 A {prune_probe['window_a']} 与 "
+        f"窗口 B {prune_probe['window_b']} 有重叠，这样测不出幽灵分区"
+    )
+    assert prune_probe["outside_rows"] == 0, (
+        f"全窗口跑批后 ods_order_info 里仍有 {prune_probe['outside_rows']} 行"
+        f"落在窗口外（dt 范围 {prune_probe['min_dt']} ~ {prune_probe['max_dt']}，"
+        f"窗口是 {prune_probe['window_b']}）—— 幽灵分区没有被清理"
+    )
+    assert prune_probe["dwd_outside_rows"] == 0, "DWD 层仍有窗口外的历史分区"
+    assert prune_probe["distinct_dt"] == 14, (
+        f"ods_order_info 的分区数应当等于 N_DAYS=14，实际 {prune_probe['distinct_dt']}"
+    )
+    assert "pruned=" in prune_probe["ods_message"], (
+        f"清理行数没有记进 runlog 的 ods 步骤 message（现在拿到的是 "
+        f"{prune_probe['ods_message']!r}）"
+    )
+
+
 def test_batch_id_changes_but_content_does_not(dedup_check) -> None:
     """批次号应当随每次运行变化，但**内容不该跟着变**。
 

@@ -22,7 +22,7 @@ os.environ["DW_WAREHOUSE"] = str(_TMP / "data" / "warehouse.duckdb")
 os.environ["DW_META_DB"] = str(_TMP / "data" / "meta.sqlite")
 os.environ["DW_DASHBOARD_DIR"] = str(_TMP / "dashboard")
 
-from dw import config, db, gen_source, paths, runner  # noqa: E402
+from dw import config, db, gen_source, runner
 
 # 小样本：够验证规则与口径，又能让整套测试在几十秒内跑完。
 # 取值依据：要保证每类脏数据都注入到（见 gen_source 的 _dirty_n 下限），
@@ -74,7 +74,8 @@ def window(first_run) -> tuple:
 # 状态天然隔离，而且顺带验证了"换一个目录也能跑起来"（部署时真正需要的能力）。
 _RUNNER_SNIPPET = r"""
 import json, os, sys
-from dw import config, gen_source, runner, db
+from datetime import date
+from dw import config, gen_source, runner, db, paths
 
 dirty_key = sys.argv[1]
 if dirty_key != "__all__":
@@ -129,6 +130,22 @@ with db.warehouse() as con:
         for t in ("ods_order_info", "dwd_order_detail", "dim_sku",
                   "dws_trade_user_1d", "ads_daily_metrics")
     }
+    # 日志侧的丢弃量：dwd_page_log 丢掉了多少行（null user_id 的日志、窗口外迟到日志）
+    payload["log_rows_ods"] = int(
+        con.execute("SELECT count(*) FROM ods_user_log").fetchone()[0]
+    )
+    payload["log_rows_dwd"] = int(
+        con.execute("SELECT count(*) FROM dwd_page_log").fetchone()[0]
+    )
+    payload["log_dropped"] = payload["log_rows_ods"] - payload["log_rows_dwd"]
+    # 日志侧「落在统计窗口之外」的分区文件数 —— late_arrival 注入的可见证据。
+    # 注意：这些文件**不会**被 ODS 加载（ODS 按窗口加载），所以只能在这里看。
+    _ws, _we = result.window_start, result.window_end
+    payload["late_log_partitions"] = sum(
+        1
+        for p in paths.raw_dir().glob("user_log_*.csv")
+        if not (_ws <= date.fromisoformat(p.stem[len("user_log_"):]) <= _we)
+    )
 
 print("@@RESULT@@" + json.dumps(payload, ensure_ascii=True))
 """
@@ -155,6 +172,7 @@ def _run_isolated(dirty_key: str) -> dict:
             [sys.executable, "-c", _RUNNER_SNIPPET, dirty_key],
             cwd=str(config.ROOT), env=env,
             capture_output=True, text=True, encoding="utf-8", timeout=900,
+            check=False,  # 下面手工判 returncode，这里显式声明是刻意的
         )
         if proc.returncode != 0:
             raise AssertionError(
@@ -268,6 +286,53 @@ class _IsoProject:
         return self._cache[cache_key]
 
 
+_PRUNE_CACHE: dict | None = None
+
+
+def _run_prune_probe() -> dict:
+    """在独立临时目录 + 独立进程里跑「窗口 A → 窗口 B」，验证幽灵分区被清理。"""
+    import json
+    import subprocess
+
+    tmp = Path(tempfile.mkdtemp(prefix="dw-prune-"))
+    env = {
+        **os.environ,
+        "DW_DATA_DIR": str(tmp / "data"),
+        "DW_WAREHOUSE": str(tmp / "data" / "warehouse.duckdb"),
+        "DW_META_DB": str(tmp / "data" / "meta.sqlite"),
+        "DW_DASHBOARD_DIR": str(tmp / "dash"),
+        "DW_TEST_SCALE": str(TEST_SCALE),
+        "PYTHONPATH": str(config.ROOT / "src"),
+        "PYTHONIOENCODING": "utf-8",
+    }
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _PRUNE_SNIPPET],
+            cwd=str(config.ROOT), env=env,
+            capture_output=True, text=True, encoding="utf-8", timeout=900,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"幽灵分区探测运行失败：\n{proc.stdout}\n{proc.stderr}"
+            )
+        for line in proc.stdout.splitlines():
+            if line.startswith("@@RESULT@@"):
+                return json.loads(line[len("@@RESULT@@"):])
+        raise AssertionError(f"幽灵分区探测没有输出结果：\n{proc.stdout}\n{proc.stderr}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.fixture(scope="session")
+def prune_probe() -> dict:
+    """幽灵分区探测结果（一次要跑两轮完整链路，所以缓存起来只跑一次）。"""
+    global _PRUNE_CACHE
+    if _PRUNE_CACHE is None:
+        _PRUNE_CACHE = _run_prune_probe()
+    return _PRUNE_CACHE
+
+
 def _run_iso_project(
     key: str, first: dict, second: dict, second_window: str
 ) -> dict:
@@ -293,6 +358,7 @@ def _run_iso_project(
             [sys.executable, "-c", _ISO_PROJECT_SNIPPET],
             cwd=str(config.ROOT), env=env,
             capture_output=True, text=True, encoding="utf-8", timeout=900,
+            check=False,
         )
         if proc.returncode != 0:
             raise AssertionError(
@@ -309,3 +375,67 @@ def _run_iso_project(
 @pytest.fixture(scope="session")
 def iso_project() -> _IsoProject:
     return _IsoProject()
+
+
+# --------------------------------------------------------------------------
+# 幽灵分区探测：跑「窗口 A →（换结算日重新造数）→ 窗口 B」，验证窗口 A 被清掉
+# --------------------------------------------------------------------------
+_PRUNE_SNIPPET = r"""
+import json, os
+from dw import config, gen_source, paths, runner, db
+
+scale = float(os.environ["DW_TEST_SCALE"])
+
+# ---- 第一轮：结算日 A（gen_source 的默认 SETTLE_DATE），全窗口跑批 ----
+gen_source.generate(seed=7, scale=scale)
+base_a = paths.load_baseline()
+start_a, end_a = paths.default_window(base_a)
+runner.run_pipeline(window_start=start_a, window_end=end_a,
+                    prune_out_of_window=True, verbose=False)
+
+# ---- 第二轮：把结算日整体推后（模拟「改了结算日之后重新造数并重跑」）----
+#      两轮窗口不重叠 —— 这正是产生「幽灵分区」的真实场景
+gen_source.SETTLE_DATE = "2026-12-05"
+gen_source.generate(seed=7, scale=scale)
+base_b = paths.load_baseline()
+start_b, end_b = paths.default_window(base_b)
+r2 = runner.run_pipeline(window_start=start_b, window_end=end_b,
+                         prune_out_of_window=True, verbose=False)
+
+_range = (f"dt < DATE '{start_b.isoformat()}' "
+          f"OR dt > DATE '{end_b.isoformat()}'")
+
+with db.warehouse() as con:
+    outside = con.execute(
+        f"SELECT count(*) FROM ods_order_info WHERE {_range}"
+    ).fetchone()[0]
+    dwd_outside = con.execute(
+        f"SELECT count(*) FROM dwd_order_detail WHERE {_range}"
+    ).fetchone()[0]
+    total_rows = con.execute("SELECT count(*) FROM ods_order_info").fetchone()[0]
+    n_days = con.execute(
+        "SELECT count(DISTINCT dt) FROM ods_order_info"
+    ).fetchone()[0]
+    min_dt, max_dt = con.execute(
+        "SELECT min(dt), max(dt) FROM ods_order_info"
+    ).fetchone()
+
+ods_message = ""
+for _row in r2.steps():
+    if _row["step"] == "ods":
+        ods_message = _row["message"] or ""
+
+payload = {
+    "window_a": [str(start_a), str(end_a)],
+    "window_b": [str(start_b), str(end_b)],
+    "disjoint": bool(end_a < start_b),
+    "outside_rows": int(outside),
+    "dwd_outside_rows": int(dwd_outside),
+    "total_rows": int(total_rows),
+    "distinct_dt": int(n_days),
+    "min_dt": str(min_dt),
+    "max_dt": str(max_dt),
+    "ods_message": ods_message,
+}
+print("@@RESULT@@" + json.dumps(payload, ensure_ascii=True))
+"""

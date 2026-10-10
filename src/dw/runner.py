@@ -10,14 +10,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 
-import duckdb
-
 from dw import (
-    config, db, layer_ads, layer_dim, layer_dwd, layer_dws, layer_ods,
-    paths, quality, runlog,
+    config,
+    db,
+    layer_ads,
+    layer_dim,
+    layer_dwd,
+    layer_dws,
+    layer_ods,
+    paths,
+    quality,
+    runlog,
 )
 
 
@@ -48,7 +55,8 @@ class RunResult:
         try:
             return list(
                 con.execute(
-                    "SELECT * FROM run_steps WHERE run_id = ? ORDER BY started_at, step",
+                    "SELECT * FROM run_steps WHERE run_id = ? "
+                "ORDER BY coalesce(step_seq, 999999), started_at, step",
                     (self.run_id,),
                 )
             )
@@ -90,15 +98,30 @@ def run_pipeline(
     verbose: bool = True,
     warehouse_path=None,
     meta_path=None,
+    prune_out_of_window: bool | None = None,
 ) -> RunResult:
     """跑完整链路。
 
+    执行顺序由 `config.LAYERS` 定义（**它就是这个函数的循环体**，不再是文档）：
+        ods → dim → dwd → quality（门禁）→ dws → ads
+
     force=True 时**忽略质量阻断继续跑完**——用于演示"如果不加门禁会发生什么"，
     也是真实运维里"已知问题、先出数"的应急通道（但要留痕）。
+
+    prune_out_of_window 控制"幽灵分区清理"（见 db.prune_out_of_window）：
+      · None（默认）= 自动判断：**只有这一轮的窗口恰好是项目的默认全窗口时**才清理。
+        理由：全窗口跑批是"这一轮对整仓负责"，清掉窗口外的历史分区是对的；
+        而 `run --limit 1` 这类补数场景，窗口之外的那些天是**合法数据**，绝不能删
+        （`tests/test_idempotent.py::test_partial_window_rerun_keeps_other_days`
+        就锁着这条性质）。
+      · True / False = 显式指定（CLI 用 --prune / --no-prune 传进来）。
     """
     baseline = paths.load_baseline()
+    default_start, default_end = paths.default_window(baseline)
     if window_start is None or window_end is None:
-        window_start, window_end = paths.default_window(baseline)
+        window_start, window_end = default_start, default_end
+    if prune_out_of_window is None:
+        prune_out_of_window = (window_start, window_end) == (default_start, default_end)
 
     log = runlog.RunLog(meta_path=meta_path)
     batch = batch_id or log.run_id
@@ -111,73 +134,98 @@ def run_pipeline(
 
     if verbose:
         print(f"[run] run_id={log.run_id}  窗口 {window_start} ~ {window_end}  "
-              f"({len(dates)} 天)  batch={batch}")
+              f"({len(dates)} 天)  batch={batch}"
+              + ("  [全窗口跑批：会清理窗口外的历史分区]"
+                 if prune_out_of_window else ""))
 
     try:
         with db.warehouse(warehouse_path) as con:
             # ---- 建表：一次性保证全部表结构存在（幂等，重复执行无副作用）----
             paths.ensure_schema(con)
 
-            # ---- ODS ----
-            with log.step("ods") as st:
-                r = layer_ods.run(con, dates, batch)
-                st.update(r)
-            result.rows["ods"] = r["out_rows"]
+            # 每一层怎么跑。**顺序不在这里，而在 config.LAYERS 里**——
+            # 用分派表 + 一个循环，好处是"执行顺序"只有一处定义，
+            # 不会再出现"常量里写一个顺序、代码里跑另一个顺序"的历史问题。
+            def _layer_steps() -> dict[str, Callable[[], dict]]:
+                return {
+                    "ods": lambda: layer_ods.run(con, dates, batch),
+                    "dim": lambda: layer_dim.run(
+                        con, dates, batch, window_start, window_end
+                    ),
+                    "dwd": lambda: layer_dwd.run(
+                        con, dates, batch, window_start, window_end
+                    ),
+                    "dws": lambda: layer_dws.run(
+                        con, dates, batch, window_start, window_end
+                    ),
+                    "ads": lambda: layer_ads.run(
+                        con, dates, batch, window_start, window_end
+                    ),
+                }
 
-            # ---- DIM ----
-            with log.step("dim") as st:
-                r = layer_dim.run(con, dates, batch, window_start, window_end)
-                st.update(r)
-            result.rows["dim"] = r["out_rows"]
+            steps = _layer_steps()
+            missing = [n for n in config.LAYERS if n != "quality" and n not in steps]
+            if missing:
+                raise ValueError(f"config.LAYERS 里的步骤没有实现：{missing}")
 
-            # ---- DWD ----
-            with log.step("dwd") as st:
-                r = layer_dwd.run(con, dates, batch, window_start, window_end)
-                st.update(r)
-            result.rows["dwd"] = r["out_rows"]
+            for step in config.LAYERS:
+                if step == "quality":
+                    # ---- 质量门禁 ----
+                    if with_quality:
+                        with log.step("quality") as st:
+                            results = quality.run_quality(con, dates)
+                            result.quality = results
+                            _persist_quality(log.con, log.run_id, results)
+                            passed = sum(1 for x in results if x.passed)
+                            st["message"] = f"{passed}/{len(results)} 条规则通过"
+                        if verbose:
+                            print(quality.format_report(results))
 
-            # ---- 质量门禁 ----
-            if with_quality:
-                with log.step("quality") as st:
-                    results = quality.run_quality(con, dates)
-                    result.quality = results
-                    _persist_quality(log.con, log.run_id, results)
-                    passed = sum(1 for x in results if x.passed)
-                    st["message"] = f"{passed}/{len(results)} 条规则通过"
-                if verbose:
-                    print(quality.format_report(results))
+                    # ---- 门禁判定：失败即阻断下游 ----
+                    if result.blocking_failures and not force:
+                        names = ", ".join(
+                            f"{r.rule}({r.actual:.4f} < {r.threshold})"
+                            for r in result.blocking_failures
+                        )
+                        reason = (
+                            f"{len(result.blocking_failures)} 条阻断级规则未通过：{names}"
+                        )
+                        result.blocked = True
+                        result.block_reason = reason
+                        remaining = config.LAYERS[config.LAYERS.index(step) + 1:]
+                        for skipped in remaining:
+                            log.record_skipped(skipped, reason)
+                        if verbose:
+                            print(f"\n[BLOCKED] {reason}")
+                            print(f"         下游（{'/'.join(remaining)}）已阻断，"
+                                  "指标表未更新。")
+                            print("         处理方式：修源数据/修规则后重跑；"
+                                  "或用 --force 强制出数（会在 trace 里留痕）。")
+                        return result
+                    continue
 
-            # ---- 门禁判定：失败即阻断下游 ----
-            if result.blocking_failures and not force:
-                names = ", ".join(f"{r.rule}({r.actual:.4f} < {r.threshold})"
-                                  for r in result.blocking_failures)
-                reason = f"{len(result.blocking_failures)} 条阻断级规则未通过：{names}"
-                result.blocked = True
-                result.block_reason = reason
-                for step in ("dws", "ads"):
-                    log.record_skipped(step, reason)
-                if verbose:
-                    print(f"\n[BLOCKED] {reason}")
-                    print("         下游（dws/ads）已阻断，指标表未更新。")
-                    print("         处理方式：修源数据/修规则后重跑；"
-                          "或用 --force 强制出数（会在 trace 里留痕）。")
-                return result
+                with log.step(step) as st:
+                    r = steps[step]()
+                    st.update(r)
+                    if step == "ods" and prune_out_of_window:
+                        # ---- 幽灵分区清理 ----
+                        # ODS 的"按 dt 分区先删后插"只能保证"这一天不写两遍"，
+                        # 删不掉别的窗口留下的分区。清理行数记进本步的 message，
+                        # 这样"这一轮到底删了什么"随时可查（dw.cli runs）。
+                        pruned = db.prune_out_of_window(con, window_start, window_end)
+                        if pruned:
+                            total_pruned = sum(pruned.values())
+                            detail = ", ".join(
+                                f"{k}:{v:,}" for k, v in sorted(pruned.items())
+                            )
+                            st["message"] = (
+                                f"{r['message']} pruned={total_pruned:,} ({detail})"
+                            )
+                result.rows[step] = r["out_rows"]
+                if step == "ads" and verbose:
+                    print(f"[ads] 窗口 GMV = {r['total_gmv']:,.2f}")
 
-            # ---- DWS ----
-            with log.step("dws") as st:
-                r = layer_dws.run(con, dates, batch, window_start, window_end)
-                st.update(r)
-            result.rows["dws"] = r["out_rows"]
-
-            # ---- ADS ----
-            with log.step("ads") as st:
-                r = layer_ads.run(con, dates, batch, window_start, window_end)
-                st.update(r)
-            result.rows["ads"] = r["out_rows"]
-            if verbose:
-                print(f"[ads] 窗口 GMV = {r['total_gmv']:,.2f}")
-
-            # ---- 看板（可选）----
+            # ---- 看板（可选；它不是数仓分层，所以不在 config.LAYERS 里）----
             if dashboard:
                 from dw import export_dashboard
 

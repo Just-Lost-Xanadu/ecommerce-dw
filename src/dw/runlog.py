@@ -34,6 +34,11 @@ class RunLog:
     run_id: str = field(default_factory=new_run_id)
     meta_path: object | None = None
     _con: sqlite3.Connection | None = field(default=None, repr=False)
+    # 步骤序号：**按真实执行顺序自增**。
+    # 为什么需要它：started_at 只精确到秒，一轮几十秒的跑批里好几个步骤会落在
+    # 同一秒，只按时间排序会退化成按字母序排列，展示出来的顺序就不是执行顺序了
+    # （实测踩过：摘要里 ads 排到了 dws 前面，而实际是 dws 先跑）。
+    _seq: int = field(default=0, repr=False)
 
     @property
     def con(self) -> sqlite3.Connection:
@@ -56,16 +61,19 @@ class RunLog:
         out_rows: int | None,
         dropped_rows: int | None,
         message: str | None,
+        started_at: datetime | None = None,
     ) -> None:
+        self._seq += 1
         self.con.execute(
             "INSERT OR REPLACE INTO run_steps"
-            "(run_id, step, status, started_at, duration_ms, in_rows, out_rows,"
-            " dropped_rows, message) VALUES (?,?,?,?,?,?,?,?,?)",
+            "(run_id, step, step_seq, status, started_at, duration_ms, in_rows,"
+            " out_rows, dropped_rows, message) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
                 self.run_id,
                 step,
+                self._seq,
                 status,
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                (started_at or datetime.now()).strftime("%Y-%m-%d %H:%M:%S"),
                 duration_ms,
                 in_rows,
                 out_rows,
@@ -90,6 +98,9 @@ class RunLog:
         否则"跑到一半被 Ctrl-C"在库里看不到任何痕迹。
         """
         started = time.perf_counter()
+        # 进入步骤的**那一刻**；原来这个时间戳是在 _write 里取的，
+        # 也就是"完成时刻"被当成了 started_at（列名与内容不符）。
+        started_at = datetime.now()
         info: dict = {
             "in_rows": None,
             "out_rows": None,
@@ -98,12 +109,13 @@ class RunLog:
         }
         try:
             yield info
-        except BaseException as exc:  # noqa: BLE001 - 记录后原样上抛
+        except BaseException as exc:  # 记录后原样上抛
             elapsed = int((time.perf_counter() - started) * 1000)
             self._write(
                 name, "failed", elapsed,
                 info.get("in_rows"), info.get("out_rows"),
                 info.get("dropped_rows"), f"{type(exc).__name__}: {exc}",
+                started_at=started_at,
             )
             raise
         else:
@@ -112,21 +124,26 @@ class RunLog:
                 name, "ok", elapsed,
                 info.get("in_rows"), info.get("out_rows"),
                 info.get("dropped_rows"), info.get("message"),
+                started_at=started_at,
             )
 
-    def record_blocked(self, step: str, reason: str, duration_ms: int = 0) -> None:
-        """质量门禁拦截下游时调用——被拦住也是一个需要留痕的结果。"""
-        self._write(step, "blocked", duration_ms, None, None, None, reason)
-
     def record_skipped(self, step: str, reason: str) -> None:
-        """因上游被阻断而跳过。"""
+        """因上游被阻断而跳过。
+
+        被拦住也是一个需要留痕的结果——它和"跑失败了"是两件事，
+        所以状态用 `blocked` 而不是 `failed`。
+        """
         self._write(step, "blocked", 0, None, None, None, f"上游阻断，已跳过：{reason}")
 
     # ---- 查询 ------------------------------------------------------------
     def steps(self) -> list[sqlite3.Row]:
+        # 按 step_seq 排序 = 按真实执行顺序。
+        # `coalesce(step_seq, 999999)` 是为了兼容加这一列之前写入的历史行：
+        # 那些行 step_seq 是 NULL，排序时回退到按时间/名称（老行为）。
         return list(
             self.con.execute(
-                "SELECT * FROM run_steps WHERE run_id = ? ORDER BY started_at, step",
+                "SELECT * FROM run_steps WHERE run_id = ? "
+                "ORDER BY coalesce(step_seq, 999999), started_at, step",
                 (self.run_id,),
             )
         )

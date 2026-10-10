@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from dw import config, db, paths, runner
+from dw import config, db, paths, quality, runner
 
 # 在隔离目录里收集的对账口径数据
 _RECON_SPEC = {
@@ -32,6 +32,45 @@ def test_pipeline_completes_and_fills_all_layers(all_dirty) -> None:
         assert all_dirty["steps"].get(step) == "ok", (
             f"步骤 {step} 状态是 {all_dirty['steps'].get(step)}，期望 ok"
         )
+
+
+def test_run_steps_are_in_execution_order(first_run) -> None:
+    """运行记录必须按**真实执行顺序**返回，而不是按字母序。
+
+    `started_at` 只精确到秒，一轮几十秒的跑批里好几个步骤落在同一秒，
+    只按时间排序会退化成按字母序排列——实测出现过 `ads` 排到 `dws` 前面，
+    读的人会以为 ads 先跑。所以 run_steps 增加 `step_seq` 列，排序以它为准。
+    """
+    steps = list(first_run.steps())
+    names = [s["step"] for s in steps]
+    seqs = [s["step_seq"] for s in steps]
+    core = [n for n in names if n in config.LAYERS]
+    assert core == list(config.LAYERS), (
+        f"步骤顺序不等于 config.LAYERS 定义的执行顺序：{core} != {list(config.LAYERS)}"
+    )
+    assert all(s is not None for s in seqs), f"有步骤没有 step_seq：{list(zip(names, seqs))}"
+    assert seqs == sorted(seqs), f"step_seq 不是递增的：{list(zip(names, seqs))}"
+
+
+def test_day_over_day_rule_is_skipped_for_single_day_window(con, window) -> None:
+    """窗口只有 1 天时，日环比规则必须标为「不适用」，而不是伪装成通过。
+
+    这条对应 `python -m dw.cli run --limit 1`（T+1 日批）：只有一天就没有
+    "可比的上一日"，日环比根本算不出来。旧写法在这种情况下 tot = 0，
+    直接返回 actual = 1.0「通过」——一个在日批模式下完全失效的监控，
+    而且它在报告里长得和"真的检查过了"一模一样。
+    """
+    _, end = window
+    results = quality.run_quality(con, [end])
+    r = next(x for x in results if x.rule == "gmv_day_over_day")
+    assert r.skipped is True, (
+        f"单日窗口下 gmv_day_over_day 没有被标为不适用："
+        f"skipped={r.skipped}, actual={r.actual}, detail={r.detail!r}"
+    )
+    assert r.status_cn == "不适用", f"展示状态不对：{r.status_cn}"
+    # 不适用时对外语义仍然是「通过」（它不阻断、也不算失败），但必须带 skipped 标记，
+    # 否则报告上分不出「真的检查过了」和「根本算不出来」。
+    assert r.passed is True and r.actual == 0.0
 
 
 def test_run_log_records_every_step(all_dirty) -> None:
@@ -224,9 +263,8 @@ def test_missing_source_data_gives_actionable_error(monkeypatch) -> None:
 
     monkeypatch.setattr(paths, "raw_exists", lambda: False)
     start, _ = paths.default_window()
-    with db.warehouse() as con:
-        with pytest.raises(FileNotFoundError, match="dw.cli gen"):
-            layer_ods.run(con, [start], "test-batch")
+    with db.warehouse() as con, pytest.raises(FileNotFoundError, match="dw.cli gen"):
+        layer_ods.run(con, [start], "test-batch")
 
 
 def test_config_error_names_the_variable(monkeypatch) -> None:

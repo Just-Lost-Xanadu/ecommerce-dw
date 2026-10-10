@@ -1,15 +1,34 @@
 # 电商用户行为与订单离线数仓
 
-> 把埋点日志与订单数据加工成四层数仓，产出可复算的运营指标，
+> 把埋点日志与订单数据加工成五层数仓（ODS / DIM / DWD / DWS / ADS），产出可复算的运营指标，
 > 并让**数据质量问题可见、可阻断、可解释**，让**重跑幂等、可验证**。
 
 一条命令从零跑完，全程离线，不依赖任何云服务或集群。
 
+### 快速开始（照这个顺序敲，可以一次跑通）
+
 ```bash
-python -m dw.cli gen      # 生成源数据（含 9 类已知脏数据）
-python -m dw.cli run      # 跑完整链路：ODS → DIM → DWD → 质量门禁 → DWS → ADS → 看板
-python -m dw.cli recon    # 对账与倾斜量化（两个技术难点的实测证据）
+# 1. 建虚拟环境并装依赖
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+
+# 2. 【必须】把项目装成包，否则 python -m dw.cli 会报 No module named dw
+#    原因：代码在 src/dw/ 下，Python 默认的模块搜索路径里没有 src。
+.venv\Scripts\python.exe -m pip install -e .
+#    Windows 下不想安装也可以，改成把 src 加进 PYTHONPATH（当前会话有效）：
+#      cmd:        set PYTHONPATH=src
+#      PowerShell: $env:PYTHONPATH = "src"
+
+# 3. 跑数
+.venv\Scripts\python.exe -m dw.cli gen      # 生成源数据（含 9 类已知脏数据）
+.venv\Scripts\python.exe -m dw.cli run      # 跑完整链路：ODS → DIM → DWD → 质量门禁 → DWS → ADS → 看板
+.venv\Scripts\python.exe -m dw.cli recon    # 对账与倾斜量化（两个技术难点的实测证据）
 ```
+
+> 装好 `-e .` 之后（或激活了虚拟环境），上面每条都可以简写成 `python -m dw.cli gen`。
+> 注意 **`pytest -q` 不需要第 2 步**——`pyproject.toml` 里有 `pythonpath = ["src"]`，
+> pytest 自己会把 `src` 加进路径。所以会出现「测试全绿、命令行却说找不到 dw 包」的现象，
+> 这是本项目最容易让人怀疑人生的第一个坎，原因就在这里。
 
 ---
 
@@ -19,7 +38,7 @@ python -m dw.cli recon    # 对账与倾斜量化（两个技术难点的实测�
 本项目把这条链路做成可调度的批处理管道：
 
 - **统一口径**：所有指标只在 ADS 层定义，明细口径（去重、退款、有效性）统一收口在 DWD；
-- **质量可控**：11 条质量规则 + 严重问题**阻断下游**；
+- **质量可控**：12 条质量规则（4 条阻断级 + 8 条告警级）+ 严重问题**阻断下游**；
 - **可解释**：被剔除的数据**标记原因而不删除**，所以"少了多少、为什么少"随时可查；
 - **可重跑**：任何一层重跑都不产生重复数据，且有测试锁住这条性质。
 
@@ -110,24 +129,33 @@ DWD 报出 0 行金额为空，看起来像"源数据很干净"。
 
 ---
 
-## 四、数据质量（11 条规则）
+## 四、数据质量（12 条规则）
 
 | 规则 | 层 | 类型 | 阻断 | 说明 |
 |---|---|---|---|---|
-| `unique_order_id` | DWD | 唯一性 | ✅ | 订单号必须唯一（验证去重结论） |
-| `not_null_user_id` | DWD | 完整性 | ✅ | 有效订单必须有 user_id |
-| `positive_amount` | DWD | 值域 | ✅ | 进入指标的金额必须为正 |
-| `valid_event_enum` | DWD | 值域 | ✅ | 行为事件枚举合法 |
-| `orphan_sku_rate_dwd` | DWD | 参照完整性 | ❌ | 孤儿商品率限额（ADS 用「未知类目」兜住） |
-| `orphan_sku_rate_ods` | ODS | 参照完整性 | ❌ | 源侧孤儿率，与 DWD 侧对比看清洗挡掉多少 |
-| `consistent_user_phone` | DIM | 一致性 | ❌ | 同一 user_id 的手机号必须唯一 |
-| `event_date_in_window` | ODS | 时效性 | ❌ | 分区日期与事件日期必须一致 |
-| `source_days_within_boundary` | 源文件 | 时效性 | ❌ | 源分区文件不得出现超出结算日的日期 |
-| `gmv_day_over_day` | DWS | 波动监控 | ❌ | GMV 日环比超 ±50% 需人工确认 |
-| `reject_rate_max` | DWD | 健康度 | ❌ | 剔行率上限，超限说明源数据质量崩了 |
+| `unique_order_id` | DWD | 唯一性 | ✅ | 订单号必须唯一。**在 DWD 上恒为通过**（DWD 已去重），它是防「去重逻辑被改坏」的回归护栏 |
+| `not_null_user_id` | DWD | 完整性 | ✅ | 有效订单必须有 user_id（在 DWD 全量行上算非空率） |
+| `positive_amount` | DWD | 值域 | ✅ | **没有任何一行可以「既被判为有效、金额又非正」**（is_valid 与 amount 必须自洽）。⚠️ 旧口径是「在 is_valid 行上算 amount > 0」，而 is_valid 已蕴含 amount > 0，属于恒真表达式，已修正 |
+| `valid_event_enum` | DWD | 值域 | ✅ | 行为事件枚举合法（漏斗依赖它） |
+| `orphan_sku_rate_dwd` | DWD | 参照完整性 | ❌ | 孤儿商品率**上限 0.5%**（ADS 用「未知类目」兜住，所以是可控告警） |
+| `orphan_sku_rate_ods` | ODS | 参照完整性 | ❌ | 源侧孤儿率**上限 2%**。⚠️ 孤儿行在 DWD **不会**被剔除，所以本规则的孤儿数与 DWD 侧**当前恒等**，两者差值暂无信息量（等 DWD 开始剔孤儿行才有意义） |
+| `consistent_user_phone` | DIM | 一致性 | ❌ | ❌ |
+| `event_date_in_window` | ODS | 时效性 | ❌ | ⚠️ **该规则当前恒真**：ODS 的 `dt` 由 `log_date` 派生，两者结构上不可能不一致。保留作为「接入层改成按文件分区名落 dt」之后的守卫 |
+| `source_days_within_boundary` | 源文件 | 时效性 | ❌ | 源分区文件不得出现超出结算日的日期（**实测命中 25 个超前分区**，是本项目唯一常年红色、也最该关注的告警） |
+| `gmv_day_over_day` | DWD | 波动监控 | ❌ | **超限天数上限 0**：任何一天 GMV 日环比超过 ±50% 都要人工确认。读的是 `dwd_order_detail`（因为门禁跑在 dws **之前**，读 dws 会读到空表或上一轮的旧数据）。窗口只有 1 天时本规则标为「不适用（skipped）」，不再伪装成通过 |
+| `reject_rate_max` | DWD | 健康度 | ❌ | 剔行率上限 5%，超限说明源数据质量崩了 |
+| `funnel_stage_monotonic` | DWD | 一致性 | ❌ | 漏斗各阶段人数必须单调不增（浏览 ≥ 加购 ≥ 下单）。**这条在当前造数数据上就会失败**（下单人数比加购还多、转化率 > 100%），是一条有意保留的「活靶子」 |
 
 **每条规则都有真靶子**：造数脚本注入 9 类脏数据，规则必须能抓到它们；
 `--reanalyze` 式的**离线重算**不需要重新生成数据。
+
+### 4.0 两处如实说明（不藏的覆盖缺口）
+
+1. **`late_arrival`（迟到 600 行日志）目前没有任何规则负责**。它们的日期落在统计窗口之外，
+   ODS 按窗口加载，根本进不了数仓，仓库内的规则看不到——这正是「校验点必须前移到接入边界」的另一面。
+   现在只在**源文件层面**守：`tests/test_quality.py::test_late_arrival_stays_out_of_window`。
+2. **「9 类脏数据 / 8 个开关」**：订单侧的空 `user_id`（`null_user_id`）与日志侧的空 `user_id`（`null_user_log`）
+   是两个独立的注入块，却共用了 `null_user_id` 这一个开关 —— 所以 `config.DIRTY` 是 8 个键，而 `dw.cli gen` 打印 9 行。
 
 ```bash
 python -m dw.cli quality    # 只看质量报告
@@ -199,12 +227,26 @@ python -m dw.cli recon
 
 ### 6.3 各层产出
 
-| 表 | 行数 |
-|---|---|
-| `ods_user_log` / `ods_order_info` | 2,400,800 / 362,800 |
-| `dwd_page_log` / `dwd_order_detail` | 2,400,000 / 360,800 |
-| `dws_traffic_user_1d` / `dws_trade_user_1d` | 552,238 / 259,731 |
-| `ads_daily_metrics` / `ads_gmv_category_1d` / `ads_funnel_1d` | 28 / 196 / 84 |
+用 `python -m dw.cli tables` 实测（干净的单次全窗口跑批，窗口 2026-10-21 ~ 2026-11-03，14 天）：
+
+| 层 | 表 | 行数 |
+|---|---|---|
+| ODS | `ods_order_info` | 181,400 |
+| ODS | `ods_user_log` | 1,200,400 |
+| DIM | `dim_sku` / `dim_user` / `dim_date` | 800 / 20,000 / 14 |
+| DWD | `dwd_order_detail` | 180,800（其中有效 180,360，剔行率 0.24%） |
+| DWD | `dwd_page_log` | 1,200,000 |
+| DWD | `dwd_order_reject_audit` | 56 |
+| DWS | `dws_traffic_user_1d` / `dws_trade_user_1d` | 276,125 / 129,864 |
+| ADS | `ads_daily_metrics` / `ads_gmv_category_1d` / `ads_funnel_1d` | 14 / 98 / 42 |
+
+质量报告 **10/11 通过**，唯一失败的是 `source_days_within_boundary`（命中 25 个超前分区，告警级、不阻断下游）。
+
+> 关于这张表要提醒一句（也是这个项目踩过的真实坑）：**它必须是「一次干净跑批」的数字**。
+> 如果表里同时躺着两代数据（例如换了结算日重新造数后重跑，而窗口不重叠），
+> 行数会翻倍，而且**质量规则和对账都带 `dt BETWEEN 窗口` 过滤，完全看不见它们**。
+> 现在 `runner` 在全窗口跑批时会自动清理窗口外的历史分区（`prune_out_of_window`，见第八节与 `dw.cli run --no-prune`），
+> 清理行数会记进 `run_steps` 的 ods 步骤 message（形如 `pruned=362,800`），由 `tests/test_idempotent.py::test_full_window_run_prunes_ghost_partitions` 守住。
 
 ---
 
@@ -240,14 +282,15 @@ ecommerce-dw/
 │   ├── layer_dwd.py
 │   ├── layer_dws.py
 │   ├── layer_ads.py
-│   ├── quality.py            # 11 条质量规则 + 报告 + 阻断判定
+│   ├── quality.py            # 12 条质量规则 + 报告 + 阻断判定
 │   ├── checks.py             # 对账与倾斜量化
 │   └── export_dashboard.py   # 离线 HTML 看板
 ├── sql/                      # 全部建表与加工 SQL（含设计理由注释）
 ├── spark/skew_experiment.py  # 倾斜对照实验（可选，见该文件说明）
-├── tests/                    # 42 项测试
+├── tests/                    # 48 项测试
 ├── docs/                     # 指标口径 / 数据字典
-└── dashboard/out/report.html # 看板产物（可离线打开）
+├── dashboard/out/report.html # 看板产物（可离线打开）
+└── LICENSE                   # MIT
 ```
 
 ---
@@ -255,14 +298,14 @@ ecommerce-dw/
 ## 九、测试
 
 ```bash
-python -m pytest -q          # 42 passed
+python -m pytest -q          # 48 passed
 ```
 
 | 文件 | 覆盖 |
 |---|---|
-| `test_quality.py` | **每条规则对每类脏数据的灵敏度**（注入 → 命中；关掉注入 → 命中归零/下降）、剔除原因分布、阈值方向、规则名唯一 |
-| `test_idempotent.py` | 重跑逐行一致、行数稳定、GMV 稳定、**只补一天不影响其他天** |
-| `test_pipeline.py` | 分层完整、对账口径、倾斜真实存在、门禁确实阻断、`--force` 留痕、运行记录落库、看板离线可开、错误信息可操作 |
+| `test_quality.py` | **每条规则对每类脏数据的灵敏度**（注入 → 命中；关掉注入 → 命中归零/下降）、剔除原因分布、阈值方向、规则名唯一；**漏斗单调性规则必须真的失败**、**日志侧丢弃量可见**、**迟到数据留在窗口外的源分区里（覆盖缺口的显式断言）** |
+| `test_idempotent.py` | 重跑逐行一致、行数稳定、GMV 稳定、**只补一天不影响其他天**、**全窗口跑批会清理幽灵分区且把行数记进 trace** |
+| `test_pipeline.py` | 分层完整、对账口径、倾斜真实存在、门禁确实阻断、`--force` 留痕、运行记录落库、**步骤顺序等于执行顺序（step_seq）**、看板离线可开、错误信息可操作 |
 
 **两个关键测试设计**：
 
@@ -283,7 +326,8 @@ python -m pytest -q          # 42 passed
 - **调度是自写 runner + cron，未上 Airflow / DolphinScheduler**。
   理由：本项目只有 5 层线性依赖，自己实现一遍更能说明"依赖顺序、幂等、失败阻断"是怎么控制的。
   生产环境下会评估现成调度系统（它们本质上也是把这四件事产品化）。
-- **质量规则 11 条，未覆盖分布漂移与异常检测**。目前只有日环比波动这一条粗粒度监控。
+- **质量规则 12 条，未覆盖分布漂移与异常检测**。目前只有日环比波动这一条粗粒度监控；
+  另外 `event_date_in_window` 在当前 ODS 结构下恒真（保留作为接入层守卫），见第四节说明。
 - **未做数据血缘可视化**，血缘只体现在 `_source_file` / `_batch_id` 两个元数据列上。
 - **维度不做拉链表（SCD2）**，全量覆盖。需要历史状态回溯时见 [`docs/可选加分项.md`](docs/可选加分项.md)。
 - **无鉴权、无多用户隔离**：本项目是单机演示，`data/` 目录即全部边界。
@@ -293,13 +337,16 @@ python -m pytest -q          # 42 passed
 
 ## 十一、环境
 
-Python 3.10+，依赖仅 `duckdb` 与 `pandas`（测试另需 `pytest`）。
+Python 3.10+，依赖 `duckdb`、`pandas`、`numpy`（测试另需 `pytest`）。
 
 ```bash
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt   # Windows
-.venv\Scripts\python.exe -m pip install -e ".[dev]"           # 以包形式安装（可选）
+.venv\Scripts\python.exe -m pip install -e ".[dev]"           # 必做：否则 python -m dw.cli 找不到 dw 包
 ```
+
+> `numpy` 是 `gen_source.py` 直接 import 的依赖（造数用 `np.random.default_rng`），
+> 所以它被显式写进了 `requirements.txt` / `pyproject.toml`——不能只靠 pandas 传递安装，那是隐式依赖。
 
 环境变量（可选，都有默认值）：
 
@@ -315,9 +362,11 @@ python -m venv .venv
 ```bash
 python -m dw.cli gen                 # 生成源数据（含脏数据注入）
 python -m dw.cli gen --scale 0.05    # 小样本（秒级，用于快速验证）
-python -m dw.cli run                 # 全量跑批（含质量门禁与看板）
-python -m dw.cli run --limit 1       # 只跑窗口最后一天（模拟 T+1 日批）
+python -m dw.cli run                 # 全量跑批（含质量门禁与看板；会自动清理窗口外的历史分区）
+python -m dw.cli run --limit 1       # 只跑窗口最后一天（模拟 T+1 日批；不清理窗口外分区）
 python -m dw.cli run --force         # 忽略门禁强制出数（会留痕）
+python -m dw.cli run --no-prune      # 全窗口跑批但**不**清理窗口外的历史分区
+python -m dw.cli run --prune         # 强制清理窗口外的历史分区（补数后清幽灵分区用）
 python -m dw.cli quality             # 只输出质量报告
 python -m dw.cli recon               # 对账 + 倾斜量化
 python -m dw.cli tables              # 列出数仓表与行数
@@ -325,6 +374,13 @@ python -m dw.cli runs                # 查看历史跑批记录
 python -m dw.cli dashboard           # 只重新生成看板
 python -m pytest -q                  # 跑测试
 ```
+
+**关于 `--prune`（幽灵分区清理）**：ODS 的幂等是「按 `dt` 分区先删后插」，它只能保证
+「这一天不会被写两遍」，**删不掉别的窗口留下的分区**。换了结算日重新造数后重跑，新旧窗口的日期
+不重叠时，`ods_order_info` 里会同时留下两代数据；更麻烦的是质量规则与对账都带
+`dt BETWEEN 窗口` 过滤，**完全看不见它们**（只有 `dw.cli tables` 的全表计数会暴露）。
+所以全窗口跑批时会顺带删除窗口外（所有含 `dt` 列的表）的历史分区，行数记进 `run_steps`；
+而 `--limit` 的补数场景默认**不**清理——窗口之外的那些天是合法数据。
 
 ---
 

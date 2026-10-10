@@ -12,7 +12,7 @@ from pathlib import Path
 
 import duckdb
 
-from dw import config, paths
+from dw import paths
 
 
 def _load_one(

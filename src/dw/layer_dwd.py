@@ -67,6 +67,14 @@ def run(
     log_total = int(con.execute(
         f"SELECT count(*) FROM dwd_page_log WHERE dt BETWEEN DATE '{start}' AND DATE '{end}'"
     ).fetchone()[0])
+    # 日志侧的丢弃量也要可见：dwd_page_log 会丢掉"user_id 为空"的行为，
+    # 但原来这一层只统计订单侧的 dropped_rows，日志丢了多少行**完全没有数字**。
+    # 而"少了多少、为什么少"正是这个项目要回答的问题，日志侧同样不能例外。
+    log_in = int(con.execute(
+        f"SELECT count(*) FROM ods_user_log WHERE dt BETWEEN DATE '{start}' AND DATE '{end}'"
+    ).fetchone()[0])
+    log_dropped = max(0, log_in - log_total)
+
     rejected = order_total - order_valid
     reject_rate = (rejected / order_total) if order_total else 0.0
 
@@ -79,11 +87,14 @@ def run(
     reason_txt = " ".join(f"{r[0]}={r[1]}" for r in reasons if r[0] != "kept")
 
     return {
-        "in_rows": order_total + log_total,
+        "in_rows": order_total + log_in,
         "out_rows": order_valid + log_total,
-        "dropped_rows": rejected,
+        # dropped_rows 现在同时含订单侧（无效订单）与日志侧（空 user_id 的日志）
+        "dropped_rows": rejected + log_dropped,
         "reject_rate": reject_rate,
+        "log_dropped": log_dropped,
         "message": f"order_valid={order_valid:,}/{order_total:,} "
-                   f"log={log_total:,} reject_rate={reject_rate:.2%}"
+                   f"log={log_total:,}/{log_in:,} log_dropped={log_dropped:,} "
+                   f"reject_rate={reject_rate:.2%}"
                    + (f" [{reason_txt}]" if reason_txt else ""),
     }

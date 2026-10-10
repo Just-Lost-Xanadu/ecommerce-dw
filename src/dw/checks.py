@@ -31,10 +31,16 @@ class ReconResult:
         return "\n".join([
             "对账结果（基准 = 造数时的精确业务口径：唯一订单且已支付）",
             f"  基准 GMV            {self.baseline_gmv:,.2f}  ({self.baseline_orders:,} 单)",
-            f"  清洗前（源表直算）   {self.raw_gmv:,.2f}  ({self.raw_orders:,} 行)"
-            f"   差异 {self.raw_diff_pct:+.3f}%",
-            f"  清洗后（DWD 收口）   {self.dwd_gmv:,.2f}  ({self.dwd_orders:,} 单)"
-            f"   差异 {self.dwd_diff_pct:+.3f}%",
+            (
+                f"  清洗前（源表直算）   {self.raw_gmv:,.2f}  "
+                f"({self.raw_orders:,} 行)"
+                f"   差异 {self.raw_diff_pct:+.3f}%"
+            ),
+            (
+                f"  清洗后（DWD 收口）   {self.dwd_gmv:,.2f}  "
+                f"({self.dwd_orders:,} 单)"
+                f"   差异 {self.dwd_diff_pct:+.3f}%"
+            ),
             f"  → 收口把差异率从 {abs(self.raw_diff_pct):.3f}% 降到 {abs(self.dwd_diff_pct):.3f}%",
         ])
 
@@ -88,13 +94,17 @@ class SkewResult:
         return "\n".join([
             "倾斜量化（按 user_id 聚合时的分组规模分布）",
             f"  参与聚合的订单行数    {self.total_rows:,}",
-            f"  热销 SKU {self.hot_sku}   {self.hot_sku_rows:,} 行"
-            f"（占比 {self.hot_sku_share:.2%}）",
+            (
+                f"  热销 SKU {self.hot_sku}   {self.hot_sku_rows:,} 行"
+                f"（占比 {self.hot_sku_share:.2%}）"
+            ),
             f"  聚合分组数            {self.n_groups:,}",
             f"  最大分组行数          {self.max_group_rows:,}",
             f"  分组中位数            {self.p50_group_rows:,}",
-            f"  最大 / 中位数         {self.max_over_p50:.1f}x"
-            "   ← 倍数越大，单个 task 越可能成为长尾",
+            (
+                f"  最大 / 中位数         {self.max_over_p50:.1f}x"
+                "   ← 倍数越大，单个 task 越可能成为长尾"
+            ),
             "  → 这就是 Spark 里某个 task 明显比同 stage 其他 task 慢的成因；",
             "    对照实验见 spark/skew_experiment.py",
         ])

@@ -35,7 +35,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from dw import config, db, paths  # noqa: E402
+from dw import config, db, paths
 
 # 加盐的分桶数。取 8 是一个折中：
 #   太小（比如 2）打散不充分，长尾只是被切成两条长的；
@@ -134,7 +134,7 @@ def duckdb_baseline() -> None:
 # B. Spark 对照（需要 pyspark）
 # --------------------------------------------------------------------------
 def spark_experiment(warehouse: str, start: str, end: str) -> None:
-    from pyspark.sql import SparkSession, functions as F
+    from pyspark.sql import SparkSession
 
     print("=" * 72)
     print("B. Spark 对照：直接聚合 vs 加盐两阶段聚合")

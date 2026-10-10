@@ -61,13 +61,67 @@ def table_count(con: duckdb.DuckDBPyConnection, table: str) -> int:
         return -1
 
 
+def tables_with_column(
+    con: duckdb.DuckDBPyConnection, column: str, schema: str = "main"
+) -> list[str]:
+    """列出含指定列的所有基表（按表名排序）。"""
+    rows = con.execute(
+        "SELECT c.table_name FROM information_schema.columns c "
+        "JOIN information_schema.tables t "
+        "  ON t.table_schema = c.table_schema AND t.table_name = c.table_name "
+        "WHERE c.table_schema = ? AND c.column_name = ? "
+        "  AND t.table_type = 'BASE TABLE' "
+        "ORDER BY c.table_name",
+        [schema, column],
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def prune_out_of_window(
+    con: duckdb.DuckDBPyConnection, window_start, window_end,
+) -> dict[str, int]:
+    """把"不属于当前统计窗口"的历史分区从各层表里删掉（幽灵分区清理）。
+
+    为什么必须有这一步：
+      ODS 的幂等是「**按 dt 分区先删后插**」——它只能保证「这一天不会被写两遍」，
+      **完全无法阻止别的窗口留下的分区一直躺在表里**。
+      真实踩过的场景：换个结算日重新造数后重跑，新窗口与旧窗口的日期不重叠，
+      于是 ods_order_info 里同时存在两代数据（实测 181,400 × 2 = 362,800 行、
+      两个不同的 _batch_id）；更糟的是**质量规则和对账都带 `dt BETWEEN 窗口`
+      过滤，完全看不见它们**，最后是 `dw.cli tables` 的全表 count(*) 才暴露。
+
+    为什么要有开关：本项目同时支持「全窗口跑批」和「只补一天（T+1 日批）」。
+      补数场景下窗口**之外**的那些天是**合法数据**，绝不能删。
+      所以删除只在「这一轮是权威的全窗口重建」时进行，由调用方通过
+      `runner.run_pipeline(prune_out_of_window=...)` 决定（默认自动判断）。
+
+    覆盖范围：所有含 dt 列的基表（含 dwd / dws / ads 层）。
+      **不含 dim_date**——它是纯日历表，layer_dim 明确只重建窗口内的日期、
+      有意保留窗口外的历史日期，不应该被这里删掉。
+
+    返回 {表名: 删除行数}，只含真正删了行的表。
+    """
+    start, end = window_start.isoformat(), window_end.isoformat()
+    where = f"dt < DATE '{start}' OR dt > DATE '{end}'"
+    pruned: dict[str, int] = {}
+    for table in tables_with_column(con, "dt"):
+        n = int(
+            con.execute(f"SELECT count(*) FROM {table} WHERE {where}").fetchone()[0]
+        )
+        if n:
+            con.execute(f"DELETE FROM {table} WHERE {where}")
+            pruned[table] = n
+    return pruned
+
+
 # ---- 运行元数据（SQLite） --------------------------------------------------
 _META_SCHEMA = """
 CREATE TABLE IF NOT EXISTS run_steps (
     run_id       TEXT    NOT NULL,
     step         TEXT    NOT NULL,
+    step_seq     INTEGER,                 -- 真实执行顺序 1,2,3…；排序以它为准
     status       TEXT    NOT NULL,        -- ok / failed / blocked
-    started_at   TEXT    NOT NULL,
+    started_at   TEXT    NOT NULL,        -- 步骤**开始**的时刻（精确到秒）
     duration_ms  INTEGER NOT NULL,
     in_rows      INTEGER,
     out_rows     INTEGER,
@@ -95,6 +149,22 @@ CREATE INDEX IF NOT EXISTS idx_quality_rule ON quality_results(rule, created_at)
 """
 
 
+def _migrate_meta(con: sqlite3.Connection) -> None:
+    """增量迁移：给**已存在**的 run_steps 补上新列。
+
+    为什么不能只靠 `CREATE TABLE IF NOT EXISTS`：老库里 run_steps 已经存在，
+    `IF NOT EXISTS` 会让整条 CREATE 被跳过，新列**永远加不上**，
+    于是写入时直接报 `no such column: step_seq`。
+    所以表结构变更必须写成「先查现有列 → 缺什么补什么」的显式迁移。
+    用 `PRAGMA table_info` 而不是 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`：
+    后者在多数 SQLite 版本上并不支持，写了会直接语法报错。
+    """
+    cols = {row[1] for row in con.execute("PRAGMA table_info(run_steps)")}
+    if "step_seq" not in cols:
+        con.execute("ALTER TABLE run_steps ADD COLUMN step_seq INTEGER")
+    con.commit()
+
+
 def meta_connect(db_path: Path | None = None) -> sqlite3.Connection:
     path = Path(db_path or config.META_DB)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -103,5 +173,6 @@ def meta_connect(db_path: Path | None = None) -> sqlite3.Connection:
     # WAL：跑批时读历史与写当前步不互相阻塞。
     con.execute("PRAGMA journal_mode=WAL")
     con.executescript(_META_SCHEMA)
+    _migrate_meta(con)
     con.commit()
     return con

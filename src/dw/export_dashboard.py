@@ -14,7 +14,7 @@ from pathlib import Path
 
 import duckdb
 
-from dw import config, paths
+from dw import config
 
 _TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-CN">

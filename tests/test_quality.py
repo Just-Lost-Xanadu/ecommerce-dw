@@ -211,6 +211,55 @@ def test_rule_names_are_unique(all_dirty) -> None:
     assert len(names) == len(set(names)), f"存在重名规则：{names}"
 
 
+def test_funnel_rule_actually_fails_on_current_data(all_dirty) -> None:
+    """新增的漏斗单调性规则必须**真的会失败**——这是它存在的全部价值。
+
+    本项目造数时每个事件独立随机抽取（gen_source.FUNNEL_EVENTS），
+    用户完全可以只 buy 不 cart，于是「下单人数 > 加购人数」、转化率 > 100%。
+    一条「永远通过」的规则等于没写，所以这里断言 affected_rows > 0。
+    """
+    r = _rule(all_dirty["quality"], "funnel_stage_monotonic")
+    assert r["affected_rows"] > 0, (
+        "漏斗单调性规则没有命中任何一天——要么造数改了、要么规则写错了"
+    )
+    assert not r["passed"], "存在 buy > cart 的天，规则却判为通过"
+
+
+def test_null_user_logs_are_dropped_and_counted(isolated_runs, all_dirty) -> None:
+    """日志侧的丢弃量必须可见（原来只统计订单侧，日志丢了多少行没有数字）。
+
+    null_user_log 与 null_user_id 共用同一个开关，所以关掉 null_user_id 之后，
+    日志侧的空 user_id 也应当一起消失。
+    """
+    assert all_dirty["log_dropped"] > 0, (
+        "注入了 null_user_log，但日志侧丢弃量为 0——"
+        "要么没注入，要么 layer_dwd 没有统计它"
+    )
+    without = isolated_runs("null_user_id")
+    assert without["log_dropped"] == 0, (
+        f"关掉 null_user_id 注入后，日志侧仍有 {without['log_dropped']} 行被丢弃"
+    )
+
+
+def test_late_arrival_stays_out_of_window(isolated_runs, all_dirty) -> None:
+    """迟到数据（late_arrival）必须留在窗口**之外**的源分区文件里。
+
+    现状如实说明：**没有任何一条质量规则负责 late_arrival**——这些日志的日期
+    落在统计窗口之外，ODS 按窗口加载，它们根本进不了数仓，仓库内的规则看不到。
+    所以这里退一步，在**源文件层面**验证它的存在与消失：
+    注入了它 → 窗口外的日志分区文件数 > 0；关掉它 → 归零。
+    这不是「有覆盖」，而是把覆盖缺口显式地写进测试，避免被误认为已覆盖。
+    """
+    assert all_dirty["late_log_partitions"] > 0, (
+        "注入了 late_arrival，但源目录里没有窗口外的 user_log 分区文件"
+    )
+    without = isolated_runs("late_arrival")
+    assert without["late_log_partitions"] == 0, (
+        f"关掉 late_arrival 后，仍有 {without['late_log_partitions']} "
+        "个窗口外的日志分区文件"
+    )
+
+
 def test_quality_helpers_exist() -> None:
     """`quality` 模块对外暴露的判定函数必须存在且可调用（防止被误删）。"""
     assert callable(quality.run_quality)

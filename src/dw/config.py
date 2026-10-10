@@ -21,8 +21,14 @@ META_DB = Path(os.getenv("DW_META_DB", str(DATA_DIR / "meta.sqlite")))
 DASHBOARD_DIR = Path(os.getenv("DW_DASHBOARD_DIR", str(ROOT / "dashboard" / "out")))
 
 # ---- 数仓分层 -------------------------------------------------------------
-# 顺序即依赖顺序：runner 按这个顺序执行，前一层失败则后一层不跑。
-LAYERS: tuple[str, ...] = ("ods", "dwd", "dim", "dws", "ads")
+# 这是 **runner 真实执行的顺序**：`runner.run_pipeline()` 的主循环就是遍历
+# 这个元组（见 runner.py 里 `for step in config.LAYERS`），所以它不再是
+# "写着好看的文档"——改这里会真的改变执行顺序。
+#   · dim 必须在 dwd 之前：dwd 要 LEFT JOIN dim_sku，维表必须先存在；
+#   · quality 是**门禁**，放在 dws 之前：质量不合格就不该让脏数据流进指标层，
+#     它失败时会把它后面的所有步骤记为 blocked 并中断（force=True 时例外）；
+#   · dashboard 不是数仓分层，所以不在这个元组里。
+LAYERS: tuple[str, ...] = ("ods", "dim", "dwd", "quality", "dws", "ads")
 
 # ---- 数据规模 -------------------------------------------------------------
 N_USERS = 20_000
@@ -40,8 +46,19 @@ HOT_SKU_ID = "SKU00001"
 HOT_SKU_SHARE = 0.40
 
 # ---- 脏数据注入开关 -------------------------------------------------------
-# 生成器会注入 8 类脏数据，让每条质量规则都有真实的失败样本。
+# 这里只有 **8 个开关**，但 `python -m dw.cli gen` 会打印 **9 类**注入——
+# 因为订单侧的空 user_id（null_user_id）与日志侧的空 user_id
+# （null_user_log）是两个独立的注入块，却共用 `null_user_id` 这一个开关。
 # 做实验时可单独关掉某一类，观察质量报告的变化。
+#
+# 覆盖情况（如实说明，不假装全覆盖）：
+#   · 有规则/断言负责：dup_order_id、null_user_id（订单侧）、null_amount、
+#     negative_amount、orphan_sku、dup_user_phone、future_date（源边界规则）、
+#     null_user_log（被 dwd_page_log 丢弃，计入 layer_dwd 的 dropped_rows）；
+#   · **暂无规则负责：late_arrival**。这 600 行日志的日期落在统计窗口之外，
+#     ODS 按窗口加载，它们根本进不了数仓，仓库内的规则看不到——这正是
+#     「校验点必须前移到接入边界」的另一面。目前只在源文件层面守：
+#     tests/test_quality.py::test_late_arrival_stays_out_of_window。
 DIRTY: dict[str, bool] = {
     "dup_order_id": True,      # 同一个 order_id 出现两次
     "null_user_id": True,      # user_id 为空
@@ -68,13 +85,18 @@ QUALITY_THRESHOLDS: dict[str, float] = {
     # 真实系统里这个阈值来自"业务能容忍多少脏数据"的约定，不是拍脑袋定的数字。
     "not_null_rate": 0.995,
     "unique_rate": 1.0,            # 唯一率下限（主键必须 100%）
-    "referential_dwd_rate": 0.995,  # DWD 侧孤儿商品率上限（超了说明上游口径崩了）
-    "referential_ods_rate": 0.98,   # ODS 侧孤儿率下限（源数据本身的参照完整性）
+    # 下面两条的 actual 都是**孤儿率**（orphan/n），方向是「越小越好」，
+    # 所以阈值必须是**上限**。早期版本填了 0.995 / 0.98 这两个「合规率下界」
+    # 的数值，于是通过条件变成 `孤儿率 ≤ 99.5%`——哪怕 99% 的订单都关联不上
+    # 商品，规则依然是绿的。一条永远不会失败的质量规则等于没有规则。
+    "referential_dwd_rate": 0.005,  # DWD 侧孤儿商品率上限 0.5%（超了说明上游口径崩了）
+    "referential_ods_rate": 0.02,   # ODS 侧孤儿率上限 2%（源侧参照完整性，放宽一档）
     "value_range_rate": 0.995,     # 值域合法率下限
     "consistency_rate": 0.99,      # 跨表一致性下限
     "timeliness_rate": 0.99,       # 时效性下限
     "max_source_days_ahead": 0,    # 源侧允许出现的"超出处理边界"的天数（0 = 一天都不允许）
-    "gmv_volatility": 0.50,        # 今日 GMV 与昨日差异上限（±50%）
+    "gmv_volatility": 0.50,        # 单日 GMV 环比超过 ±50% 即视为"超限"
+    "gmv_volatility_days_max": 0,  # 允许的"超限天数"上限（0 = 一天都不允许）
     "dwd_reject_rate_max": 0.05,   # DWD 剔行率上限（超了说明源数据质量崩了）
 }
 
