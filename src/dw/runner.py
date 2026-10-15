@@ -120,8 +120,32 @@ def run_pipeline(
     default_start, default_end = paths.default_window(baseline)
     if window_start is None or window_end is None:
         window_start, window_end = default_start, default_end
+    if window_start > window_end:
+        # 空窗口不会在任何一层里"自然报错"：ODS 会安静地加载 0 行，
+        # dwd 取 dates[0] 时才抛一个和真实原因毫无关系的 IndexError。
+        # 所以在入口就把真正的原因说清楚。
+        raise ValueError(
+            f"统计窗口不合法：起始 {window_start} 晚于结束 {window_end}（窗口为空）。"
+            "常见原因是传了负数的 --limit。"
+        )
     if prune_out_of_window is None:
         prune_out_of_window = (window_start, window_end) == (default_start, default_end)
+
+    # 显式 prune + 非全窗口 = 静默删数据，直接拒绝。
+    # 为什么这是"静默"的：prune 删的是**窗口之外的所有历史分区**（覆盖所有含 dt 列的表，
+    # 含 dwd/dws/ads），而这一轮只重建窗口内那几天。于是窗口外的数据**永久消失**，
+    # 各步状态却全是 ok、退出码是 0；质量规则与对账又都带 `dt BETWEEN 窗口` 过滤，
+    # 事后连"少了多少天"都看不见，只有 `dw.cli tables` 的全表计数能暴露。
+    # CLI 侧（cmd_run）已经拒绝了 `--limit + --prune`，这里是同一道闸的兜底——
+    # 防的是绕过 CLI 直接调 run_pipeline 的调用方。
+    if prune_out_of_window and (window_start, window_end) != (default_start, default_end):
+        raise ValueError(
+            f"拒绝执行：这一轮的窗口是 {window_start} ~ {window_end}（非全窗口 "
+            f"{default_start} ~ {default_end}），却要求清理窗口外的历史分区。"
+            "这会把窗口外那些天的数据从所有含 dt 列的表里永久删掉，而本轮只重建窗口内的几天。"
+            "要清幽灵分区请跑全窗口跑批（prune_out_of_window=None 时会自动判断）；"
+            "只补某几天请不要传 prune_out_of_window=True。"
+        )
 
     log = runlog.RunLog(meta_path=meta_path)
     batch = batch_id or log.run_id
@@ -178,6 +202,20 @@ def run_pipeline(
                             _persist_quality(log.con, log.run_id, results)
                             passed = sum(1 for x in results if x.passed)
                             st["message"] = f"{passed}/{len(results)} 条规则通过"
+                            # --force 是"已知问题、先出数"的应急通道。既然它绕过了门禁，
+                            # 就必须把"绕过了哪几条"写在这一步的运行记录里：否则
+                            # `dw.cli runs` 里这一轮的"异常步"是 0，和一次干净跑批看起来
+                            # 毫无区别，而 --force 的提示语承诺的是"会在 trace 里留痕"。
+                            # 质量结果表里虽然有 passed=0 的行，但"这一轮是被强制放行的"
+                            # 这件事只有运行记录能表达。
+                            if force and result.blocking_failures:
+                                forced = ", ".join(
+                                    f"{r.rule}({r.actual:.4f} < {r.threshold})"
+                                    for r in result.blocking_failures
+                                )
+                                st["message"] += (
+                                    f"；--force 已忽略阻断级失败：{forced}"
+                                )
                         if verbose:
                             print(quality.format_report(results))
 

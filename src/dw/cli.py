@@ -26,11 +26,13 @@ def _print_header(text: str) -> None:
 
 
 def cmd_gen(args: argparse.Namespace) -> int:
-    stats = gen_source.generate(
-        seed=args.seed,
-        out_dir=__import__("pathlib").Path(args.out) if args.out else None,
-        scale=args.scale,
-    )
+    # 这里**没有** --out：源数据写到哪由 config.RAW_DIR 决定（即 DW_RAW_DIR 环境变量），
+    # 而 run / quality / recon 读的也是同一个 config.RAW_DIR。历史上这里有个 --out，
+    # 它只改变"写"，读的一侧完全不知情——`gen --out D:\snap` 不报错也不生效，
+    # 随后 run 要么拿旧数据算出错口径的指标、要么直接抛"找不到对账基准"。
+    # 一个"写得到、读不到"的开关比没有这个开关更危险，所以直接去掉，
+    # 换目录统一走 DW_DATA_DIR / DW_RAW_DIR。
+    stats = gen_source.generate(seed=args.seed, scale=args.scale)
     _print_header("源数据生成完成")
     for k, v in stats["rows"].items():
         print(f"  {k:<10} {v:>12,} 行")
@@ -44,9 +46,33 @@ def cmd_gen(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     baseline = paths.load_baseline()
     start, end = paths.default_window(baseline)
-    if args.limit:
+    default_start = start
+    if args.limit < 0:
+        # 负数不是"全窗口"，也不是"补数"：它会把 start 推到 end 之后，
+        # 窗口变成空区间，dwd 取 dates[0] 时抛 IndexError（报错完全指不出真实原因）。
+        # 直接在这里说不清楚。
+        raise SystemExit(f"--limit 必须 >= 0（0 表示全窗口），收到 {args.limit}")
+    if args.limit > 0:
         # 模拟 T+1 日批：只跑窗口内最后 N 天
         start = max(start, date.fromordinal(end.toordinal() - args.limit + 1))
+    if args.prune and (start, end) != (default_start, end):
+        # ⚠️ 这两个开关各自都合法，**凑在一起会静默删数据**：
+        #   --limit N 把窗口收窄成最后 N 天；
+        #   --prune  删掉「窗口之外的所有历史分区」（覆盖所有含 dt 列的表，含 dwd/dws/ads）。
+        # 于是 `run --limit 1 --prune` 会把其余 13 天的数据从**十张表**里删掉，
+        # 然后只重建那 1 天——各步状态全是 ok、退出码是 0，而 13 天的历史**永久消失**。
+        # 更麻烦的是质量规则与对账都带 `dt BETWEEN 窗口` 过滤，事后完全看不见。
+        # 所以这里直接拒绝，并说清两条各自正确的用法。
+        raise SystemExit(
+            "--limit 与 --prune 不能同时使用。\n"
+            f"  · --limit {args.limit} 会把窗口收窄成 {start} ~ {end}；\n"
+            "  · 而 --prune 会删掉**窗口之外的所有历史分区**"
+            "（覆盖所有含 dt 列的表，包括 dwd / dws / ads）。\n"
+            "  两者同时用，窗口外那几天的合法数据会被静默删除，而退出码仍然是 0。\n"
+            "  想清幽灵分区 → 去掉 --limit，跑一次全窗口跑批"
+            "（全窗口跑批本身就会顺带清理窗口外分区）；\n"
+            "  只补某一天   → 去掉 --prune（补数默认不会清理窗口外的数据）。"
+        )
     result = runner.run_pipeline(
         window_start=start, window_end=end,
         force=args.force, with_quality=not args.no_quality,
@@ -141,11 +167,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=20261005)
     p.add_argument("--scale", type=float, default=1.0,
                    help="数据量缩放系数（测试用小样本，例如 0.02）")
-    p.add_argument("--out", type=str, default=None, help="输出目录（默认 data/raw）")
     p.set_defaults(func=cmd_gen)
 
     p = sub.add_parser("run", help="跑完整链路")
-    p.add_argument("--limit", type=int, default=0, help="只跑窗口最后 N 天（0=全窗口）")
+    p.add_argument("--limit", type=int, default=0,
+                   help="只跑窗口最后 N 天（0=全窗口；必须 >= 0）")
     p.add_argument("--force", action="store_true", help="忽略质量门禁继续跑（会留痕）")
     p.add_argument("--no-quality", action="store_true", help="跳过质量校验")
     p.add_argument("--no-dashboard", action="store_true", help="跳过看板生成")

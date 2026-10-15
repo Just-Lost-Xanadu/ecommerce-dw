@@ -263,6 +263,18 @@ def gen_order(
         extra.append(blk)
         stats["future_date"] = len(blk)
 
+    # 定位重复块在 concat 之后的起始行，并**先把"原始单号 → 原始日期"的映射取好**。
+    # 为什么要提前取：concat 之后 df 里同时有克隆体和原始行，
+    # `drop_duplicates(keep="first")` 挑到哪一条取决于拼接顺序；从拼接前的 df 取映射，
+    # 语义才明确是"克隆体对齐到它所克隆的那一行"。
+    dup_start: int | None = None
+    base_date = None
+    if dup_blk is not None and len(dup_blk):
+        base_date = df.drop_duplicates(subset=["order_id"], keep="first").set_index(
+            "order_id"
+        )["order_date"]
+        dup_start = len(df)
+
     if extra:
         df = pd.concat([df, *extra], ignore_index=True)
 
@@ -276,22 +288,35 @@ def gen_order(
     #
     # 这个现象在真实系统里同样存在，而且是分区表去重最经典的坑：
     # **去重范围必须覆盖可能重复的分区，否则跨分区重复无法被发现**。
-    if dup_blk is not None and len(dup_blk):
-        base_date = df.drop_duplicates(subset=["order_id"], keep="first").set_index(
-            "order_id"
-        )["order_date"]
-        # 克隆体在 concat 之后位于尾部，按长度定位
-        tail = df.index >= (len(df) - len(dup_blk))
-        df.loc[tail, "order_date"] = df.loc[tail, "order_id"].map(base_date).values
+    #
+    # ⚠️ 这里**不能**假设"克隆体位于 df 尾部"：dup_blk 是 extra 的**第一块**，
+    # 后面还跟着 null_user_id / null_amount / orphan_sku / negative_amount / future_date
+    # 五块脏数据。原先按 `len(df) - len(dup_blk)` 取尾部，实际落到的是**最后一块**（未来日期），
+    # 那批行的单号在映射里只会映射回自己，看着"没出错"，但真正的重复行一行都没被校对过——
+    # 一旦脏数据块的顺序变化或克隆体重用了已有单号，尾部行会被静默改到别的日期分区。
+    # 所以按拼接时的真实偏移定位。
+    if dup_start is not None:
+        rows = df.index[dup_start : dup_start + len(dup_blk)]
+        df.loc[rows, "order_date"] = df.loc[rows, "order_id"].map(base_date).values
 
     df = df.sample(frac=1.0, random_state=20261005).reset_index(drop=True)
 
     # ---- 对账基准：与 DWD 完全同口径 ----
     #
-    # 基准 = "唯一订单 且 已支付 且 金额有效"，并且**去重时的取舍规则要和 DWD 一致**：
+    # 基准 = "唯一订单 且 已支付 且 金额有效 且 **user_id 非空**"，
+    # 并且**去重时的取舍规则要和 DWD 一致**：
     # DWD 用 `(user_id IS NULL) DESC, (amount IS NULL) DESC` 把"有问题的行"排在前面当证据，
     # 所以基准也必须用同样的规则挑那一行。否则两边各自留了不同的行，差异率会凭空出现
     # （实测踩过：基准用 keep='first'、DWD 优先留脏行，结果差 0.076%，看起来像链路有 bug）。
+    #
+    # ⚠️ `user_id` 非空这一条**曾经漏掉过**，而且漏得很典型：
+    #   DWD 的 `is_valid` 把 user_id 为空判为无效（无法归属到人），但基准原先只过滤了
+    #   paid / amount 非空 / amount > 0，**没有**过滤 user_id 非空。于是注入的 200 行
+    #   "user_id 为空"的脏数据全部留在基准里，而 DWD 把它们剔掉了——
+    #   对账残差 493,474.47 里有 341,784.97（**69.3%**）来自这个口径差，
+    #   却被 README 一句"残余来自窗口边界"全部归因掉了。
+    #   这正是本文件上面那句"基准算错比代码写错更难发现"的第二次应验：
+    #   两边的数字都"看起来对"，差异也"看起来有合理解释"。
     #
     # **基准算错比代码写错更难发现，因为两边都"看起来对"。**
     ordered = (
@@ -306,7 +331,12 @@ def gen_order(
         )
         .drop_duplicates(subset=["order_id"], keep="first")
     )
-    dwd_aligned = ordered.query("order_status == 'paid'").query("amount == amount").query("amount > 0")
+    dwd_aligned = (
+        ordered.query("order_status == 'paid'")
+        .query("amount == amount")
+        .query("amount > 0")
+        .query("user_id == user_id")          # 与 DWD 的 is_valid 对齐：user_id 为空即无效
+    )
 
     stats["clean_orders"] = len(dwd_aligned)
     # 与 DWS/ADS 一样收敛到分：不然对账时会出现"差 1e-9 元"这种噪声差异，
@@ -447,10 +477,16 @@ def _dirty_n(total: int, denom: int) -> int:
     return max(_DIRTY_MIN, min(total, total // denom))
 
 
-def generate(seed: int = 20261005, out_dir: Path | None = None, scale: float = 1.0) -> dict:
-    """生成全部源数据，返回统计信息（含对账基准）。"""
+def generate(seed: int = 20261005, scale: float = 1.0) -> dict:
+    """生成全部源数据，返回统计信息（含对账基准）。
+
+    输出目录**只有一处真相**：`config.RAW_DIR`（可用 DW_DATA_DIR / DW_RAW_DIR 覆盖）。
+    这里曾经有个 `out_dir` 参数，它只影响"写"，而 run/quality/recon 读的仍是
+    config.RAW_DIR——于是 `gen --out X` 会把数据写到 X 而后面的命令根本读不到，
+    命令不报错、结果却用旧的源数据算，属于最难发现的那种错。
+    """
     use_scale(scale)
-    out = Path(out_dir or config.RAW_DIR)
+    out = Path(config.RAW_DIR)
     out.mkdir(parents=True, exist_ok=True)
     rng = _rng(seed)
     dirty = config.DIRTY
@@ -513,9 +549,9 @@ def generate(seed: int = 20261005, out_dir: Path | None = None, scale: float = 1
 def main() -> None:
     ap = argparse.ArgumentParser(description="生成电商源数据（含已知脏数据注入）")
     ap.add_argument("--seed", type=int, default=20261005, help="随机种子（默认固定，保证可复现）")
-    ap.add_argument("--out", type=str, default=None, help="输出目录（默认 data/raw）")
+    ap.add_argument("--scale", type=float, default=1.0, help="数据量缩放系数")
     args = ap.parse_args()
-    stats = generate(args.seed, Path(args.out) if args.out else None)
+    stats = generate(args.seed, args.scale)
     print("[gen] 源数据已生成：")
     for k, v in stats["rows"].items():
         print(f"  {k:<10} {v:>10,} 行")
