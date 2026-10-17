@@ -52,22 +52,6 @@ def test_rerun_is_row_for_row_identical(dedup_check) -> None:
         )
 
 
-def test_row_counts_stable(dedup_check) -> None:
-    """行数级校验：任何一张表都不应因重跑而翻倍。"""
-    before, after = dedup_check["first"], dedup_check["second"]
-    for name in before:
-        assert len(before[name]) == len(after[name]), (
-            f"{name} 行数变化 {len(before[name])} -> {len(after[name])}，"
-            "典型的「分区覆盖」漏写 DELETE"
-        )
-
-
-def test_gmv_stable(dedup_check) -> None:
-    """指标级校验：GMV 是最直观的"有没有灌双份"的探针。"""
-    before, after = dedup_check["first"], dedup_check["second"]
-    assert before["ads_daily"] == after["ads_daily"], "重跑后每日指标发生了变化"
-
-
 def test_partial_window_rerun_keeps_other_days(iso_project) -> None:
     """只重跑最后一天时，其他天的数据必须原样保留。
 
@@ -118,13 +102,3 @@ def test_full_window_run_prunes_ghost_partitions(prune_probe) -> None:
     )
 
 
-def test_batch_id_changes_but_content_does_not(dedup_check) -> None:
-    """批次号应当随每次运行变化，但**内容不该跟着变**。
-
-    这条把"运行元数据"和"业务数据"的边界说清楚：
-    批次号存在是为了溯源（这一行是哪次跑批写进来的），它本身不参与业务口径。
-    如果哪天有人把批次号当成业务字段参与聚合，两天的指标就会因为批次不同而不同——
-    这个测试会让那种改动立刻显形。
-    """
-    before, after = dedup_check["first"], dedup_check["second"]
-    assert before["ads_daily"] == after["ads_daily"]

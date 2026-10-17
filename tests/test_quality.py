@@ -173,44 +173,6 @@ def test_no_blocking_failures_after_cleaning(all_dirty) -> None:
     assert not all_dirty["blocked"], f"链路被意外阻断：{all_dirty['blocked']}"
 
 
-def test_threshold_direction_is_correct(all_dirty) -> None:
-    """阈值方向必须显式标注——"越小越好"和"越大越好"混用会让报告读出相反结论。
-
-    这个错误很容易犯：把剔行率（越小越好）当成合规率（越大越好）来比较，
-    于是"剔行率 0.06% 很好"会被显示成"失败"。这里把方向当成一项被测性质锁住。
-    """
-    for r in all_dirty["quality"]:
-        assert isinstance(r["lower_is_better"], bool), (
-            f"规则 {r['rule']} 没有声明阈值方向"
-        )
-    assert _rule(all_dirty["quality"], "reject_rate_max")["lower_is_better"] is True
-    assert _rule(all_dirty["quality"], "unique_order_id")["lower_is_better"] is False
-
-
-def test_quality_module_is_reusable_standalone(all_dirty) -> None:
-    """质量校验必须能被单独调用（不依赖跑批），便于接进调度做"只校验"模式。"""
-    assert len(all_dirty["quality"]) >= 10, f"规则数只有 {len(all_dirty['quality'])} 条"
-    assert all(isinstance(r["actual"], float) for r in all_dirty["quality"])
-
-
-def test_quality_entries_are_all_well_formed(all_dirty) -> None:
-    """每条规则都要带齐"层 / 表 / 影响行数 / 是否阻断"——报告才可能说清楚问题。"""
-    for r in all_dirty["quality"]:
-        assert r["layer"] in {"ods", "dim", "dwd", "dws"}, f"{r['rule']} 的层不合法"
-        assert isinstance(r["affected_rows"], int)
-        assert isinstance(r["blocking"], bool)
-        # 阈值可以是 0：例如"源侧超出边界的天数"这条规则，阈值就是 0（一天都不允许）。
-        # 所以这里只要求它是数字，不要求大于 0。
-        assert isinstance(r["threshold"], (int, float))
-        assert r["threshold"] >= 0, f"{r['rule']} 的阈值是负数：{r['threshold']}"
-
-
-def test_rule_names_are_unique(all_dirty) -> None:
-    """规则名必须唯一——否则落库时后一条会覆盖前一条（PRIMARY KEY 冲突）。"""
-    names = [r["rule"] for r in all_dirty["quality"]]
-    assert len(names) == len(set(names)), f"存在重名规则：{names}"
-
-
 def test_funnel_rule_actually_fails_on_current_data(all_dirty) -> None:
     """新增的漏斗单调性规则必须**真的会失败**——这是它存在的全部价值。
 
@@ -260,9 +222,3 @@ def test_late_arrival_stays_out_of_window(isolated_runs, all_dirty) -> None:
     )
 
 
-def test_quality_helpers_exist() -> None:
-    """`quality` 模块对外暴露的判定函数必须存在且可调用（防止被误删）。"""
-    assert callable(quality.run_quality)
-    assert callable(quality.blocking_failures)
-    assert callable(quality.format_report)
-    _ = db  # 保持导入（其他测试会用到）

@@ -1,5 +1,5 @@
-# 实测通过的版本组合（Python 3.12，`pytest -q` → 51 passed）。
-# 用 == 锁死而不是 >=：README 与简历里印的 "51 passed" 只有在同一套依赖下才可复现，
+# 实测通过的版本组合（Python 3.12，`pytest -q` → 40 passed）。
+# 用 == 锁死而不是 >=：README 与简历里印的 "40 passed" 只有在同一套依赖下才可复现，
 # 松约束下某天 pip 装到新版 pandas/duckdb 就可能让这句话变成假话。
 duckdb==1.5.6
 pandas==3.0.6

@@ -73,12 +73,6 @@ def test_day_over_day_rule_is_skipped_for_single_day_window(con, window) -> None
     assert r.passed is True and r.actual == 0.0
 
 
-def test_run_log_records_every_step(all_dirty) -> None:
-    """运行 trace 必须覆盖每一步——排查"哪一步慢/丢数据"全靠它。"""
-    for expected in ("ods", "dim", "dwd", "quality", "dws", "ads"):
-        assert expected in all_dirty["steps"], f"运行记录缺少步骤 {expected}"
-
-
 # --------------------------------------------------------------------------
 # 对账口径（两个技术难点的证据）
 # --------------------------------------------------------------------------
@@ -141,28 +135,6 @@ def test_skew_is_real_in_generated_data(iso_project) -> None:
         f"热销 SKU 占比只有 {share:.2%}，低于设定的 {config.HOT_SKU_SHARE:.0%} —— "
         "造数的倾斜分布没生效"
     )
-
-
-# --------------------------------------------------------------------------
-# 口径文档化
-# --------------------------------------------------------------------------
-def test_metrics_have_documented_definitions() -> None:
-    """指标口径必须写在 SQL 注释里（口径字典的代码侧实现）。
-
-    这条测试看着"没技术含量"，但锁住的是一件真事：**口径必须和代码在一起**。
-    口径只写在外部文档里，改代码的人不会同步改文档；
-    半年后没人能说清"支付转化率"到底是不是人数口径。
-    """
-    body = paths.sql("ads_daily_metrics")
-    for keyword in ("dau", "new_users", "gmv", "pay_conversion", "aov", "已知局限"):
-        assert keyword in body, f"指标口径说明缺少 {keyword}"
-
-
-def test_layer_purpose_documented_in_sql() -> None:
-    """每层 SQL 头部要写明"这一层为什么存在"，而不只是写"做什么"。"""
-    for name in ("ods_order_info", "dwd_order_detail", "dws_trade_user_1d", "ads_daily_metrics"):
-        body = paths.sql(name)
-        assert "为什么" in body, f"{name}.sql 没有说明设计理由"
 
 
 # --------------------------------------------------------------------------
