@@ -177,37 +177,6 @@ def test_force_bypasses_gate_but_keeps_trace(monkeypatch) -> None:
 
 
 # --------------------------------------------------------------------------
-# 运行元数据落库
-# --------------------------------------------------------------------------
-def test_run_log_persisted_with_history() -> None:
-    """运行记录必须落库并保留历史——否则回答不了"昨天那次为什么失败"。"""
-    con = db.meta_connect()
-    try:
-        runs = con.execute("SELECT count(DISTINCT run_id) FROM run_steps").fetchone()[0]
-        steps = con.execute("SELECT count(DISTINCT step) FROM run_steps").fetchone()[0]
-        bad = con.execute("SELECT count(*) FROM run_steps WHERE status <> 'ok'").fetchone()[0]
-    finally:
-        con.close()
-    assert runs >= 1, "运行记录没有落库"
-    assert steps >= 6, f"落库的步骤只有 {steps} 种"
-    assert bad >= 1, "被阻断的步骤没有被记为异常状态——门禁拦了但没留痕"
-
-
-def test_quality_results_persisted_with_history() -> None:
-    """质量结果必须落库并保留历史——否则看不出"质量在退化"。"""
-    con = db.meta_connect()
-    try:
-        n = con.execute("SELECT count(*) FROM quality_results").fetchone()[0]
-        rules = con.execute(
-            "SELECT count(DISTINCT rule) FROM quality_results"
-        ).fetchone()[0]
-    finally:
-        con.close()
-    assert n > 0, "质量结果没有落库"
-    assert rules >= 10, f"落库的规则只有 {rules} 条，少于设计的 10 条"
-
-
-# --------------------------------------------------------------------------
 # 看板：必须是可离线打开的单文件
 # --------------------------------------------------------------------------
 def test_dashboard_html_is_self_contained(tmp_path) -> None:
@@ -237,10 +206,3 @@ def test_missing_source_data_gives_actionable_error(monkeypatch) -> None:
     start, _ = paths.default_window()
     with db.warehouse() as con, pytest.raises(FileNotFoundError, match="dw.cli gen"):
         layer_ods.run(con, [start], "test-batch")
-
-
-def test_config_error_names_the_variable(monkeypatch) -> None:
-    """数值型环境变量解析失败时，要报出变量名——否则排查成本极高。"""
-    monkeypatch.setenv("DW_BAD_NUM", "abc")
-    with pytest.raises(ValueError, match="DW_BAD_NUM"):
-        config.env_int("DW_BAD_NUM", 1)

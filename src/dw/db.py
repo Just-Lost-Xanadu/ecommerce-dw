@@ -226,7 +226,10 @@ def meta_connect(db_path: Path | None = None) -> sqlite3.Connection:
     con = sqlite3.connect(str(path))
     con.row_factory = sqlite3.Row
     # WAL：跑批时读历史与写当前步不互相阻塞。
+    # busy_timeout：`dw.cli runs` 可能在跑批同时读元数据库；没有这个等待窗口时，
+    # 偶发的 "database is locked" 会直接把一次正常查询变成失败。
     con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA busy_timeout=5000")
     con.executescript(_META_SCHEMA)
     _migrate_meta(con)
     con.commit()

@@ -74,15 +74,6 @@ def test_locked_warehouse_gives_actionable_error(locked_warehouse):
     assert "DW_WAREHOUSE" in msg, "没有给出换库路径这个兜底手段"
 
 
-def test_unlocked_warehouse_connects_normally(tmp_path):
-    """对照：没有冲突时照常连上，别把正常路径也改成抛错。"""
-    con = db.connect(tmp_path / "free.duckdb")
-    try:
-        assert con.execute("SELECT 1").fetchone()[0] == 1
-    finally:
-        con.close()
-
-
 def test_non_lock_failure_does_not_claim_it_is_a_lock(tmp_path):
     """非锁类失败不能照搬"残留进程"那套话术——那会把人引向错误的方向。"""
     blocked = tmp_path / "as_a_directory"

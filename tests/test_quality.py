@@ -20,8 +20,6 @@ from __future__ import annotations
 
 import pytest
 
-from dw import db, quality
-
 # 每类脏数据：负责抓它的规则
 #
 # 这张表本身就是"分层质量设计"的文档：
