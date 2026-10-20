@@ -17,13 +17,15 @@
 python -m dw.cli gen
 
 # 2. 起 Airflow（首次构建会下载镜像并安装依赖，约 3~8 分钟）
+#    Windows 推荐直接运行 .\start-airflow.ps1
+$env:COMPOSE_BAKE="false"   # 项目路径含中文时，Compose 的 bake 构建器会报错；关掉即可
 docker compose -f docker-compose.airflow.yml up --build -d
 
 # 3. 打开 http://127.0.0.1:8081
 #    账号 admin / admin（演示用，生产必须改）
 ```
 
-DAG：`ecommerce_dw_daily`，每天 02:00 左右调度一次（`@daily`）。
+DAG：`ecommerce_dw_daily`，每天 `@daily` 调度一次（按 Airflow 语义是 00:00，实际触发可能略有延迟）。
 
 > 实测（2026-10-20）：镜像构建成功，Web UI healthy；手动触发后
 > `ensure_data → run → quality → recon → dashboard` 五个 task 全部 success。

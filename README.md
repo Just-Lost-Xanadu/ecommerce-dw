@@ -354,7 +354,9 @@ ecommerce-dw/
 
 ```bash
 python -m dw.cli gen                       # 可选；DAG 的 ensure_data 会自动造数
+$env:COMPOSE_BAKE="false"                  # 项目路径含中文时，Compose bake 会报错；关掉即可
 docker compose -f docker-compose.airflow.yml up --build -d
+# 或直接运行 .\start-airflow.ps1
 # http://127.0.0.1:8081   admin / admin（演示值，生产必须改）
 ```
 
