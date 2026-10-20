@@ -1,0 +1,4 @@
+# Docker/Airflow 文件统一 LF，避免 Windows 的 CRLF 被带进容器。
+Dockerfile.airflow text eol=lf
+docker-compose.airflow.yml text eol=lf
+dags/*.py text eol=lf
