@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from datetime import date
 
@@ -26,6 +27,15 @@ def _print_header(text: str) -> None:
 
 
 def cmd_gen(args: argparse.Namespace) -> int:
+    # `--scale 0` / 负数 / NaN / inf 都不是"小样本"，而是非法输入。
+    # 之前 `use_scale` 用 `max(0.0001, scale)` 兜底，于是 `gen --scale -1`
+    # **静默**把全量数据覆盖成 30 行，命令还返回 0；后面的 run/recon 全部失真。
+    # 这类"看起来成功、实际把数据改坏"的参数必须在入口拒绝。
+    if not math.isfinite(args.scale) or args.scale <= 0:
+        raise SystemExit(
+            f"--scale 必须是大于 0 的有限数，收到 {args.scale!r}。"
+            "小样本请用 0.05 这类正数；0/负数/NaN/inf 会破坏源数据。"
+        )
     # 这里**没有** --out：源数据写到哪由 config.RAW_DIR 决定（即 DW_RAW_DIR 环境变量），
     # 而 run / quality / recon 读的也是同一个 config.RAW_DIR。历史上这里有个 --out，
     # 它只改变"写"，读的一侧完全不知情——`gen --out D:\snap` 不报错也不生效，

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -451,9 +452,19 @@ _SCALE = 1.0
 
 
 def use_scale(scale: float) -> None:
-    """设置全局缩放系数（测试与小样本演示用）。"""
+    """设置全局缩放系数（测试与小样本演示用）。
+
+    非法值必须显式报错：旧写法 `max(0.0001, float(scale))` 会把 0 和负数
+    静默夹成 0.0001，于是 `gen --scale -1` 覆盖掉全量源数据还显示成功。
+    """
     global _SCALE
-    _SCALE = max(0.0001, float(scale))
+    value = float(scale)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(
+            f"scale 必须是大于 0 的有限数，收到 {scale!r}；"
+            "小样本请用 0.05 这类正数"
+        )
+    _SCALE = value
 
 
 def _n(base: int) -> int:
