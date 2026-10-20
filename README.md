@@ -355,7 +355,7 @@ ecommerce-dw/
 ```bash
 python -m dw.cli gen                       # 可选；DAG 的 ensure_data 会自动造数
 docker compose -f docker-compose.airflow.yml up --build -d
-# http://127.0.0.1:8080   admin / admin（演示值，生产必须改）
+# http://127.0.0.1:8081   admin / admin（演示值，生产必须改）
 ```
 
 DAG：`ensure_data → run → quality → recon → dashboard`。默认 `run --limit 1`（T+1）；

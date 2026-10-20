@@ -19,11 +19,15 @@ python -m dw.cli gen
 # 2. 起 Airflow（首次构建会下载镜像并安装依赖，约 3~8 分钟）
 docker compose -f docker-compose.airflow.yml up --build -d
 
-# 3. 打开 http://127.0.0.1:8080
+# 3. 打开 http://127.0.0.1:8081
 #    账号 admin / admin（演示用，生产必须改）
 ```
 
 DAG：`ecommerce_dw_daily`，每天 02:00 左右调度一次（`@daily`）。
+
+> 实测（2026-10-20）：镜像构建成功，Web UI healthy；手动触发后
+> `ensure_data → run → quality → recon → dashboard` 五个 task 全部 success。
+> 宿主机 8080 被其他服务占用，所以 compose 把 Web UI 映射到 **8081**。
 
 ## DAG 结构
 

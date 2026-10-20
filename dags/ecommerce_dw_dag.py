@@ -63,7 +63,7 @@ with DAG(
     description="电商离线数仓：跑批 -> 质量 -> 对账 -> 看板（单写者，禁止并发）",
     doc_md=__doc__,
     default_args=default_args,
-    start_date=datetime(2026, 10, 21),
+    start_date=datetime(2026, 10, 1),
     schedule="@daily",
     catchup=False,
     max_active_runs=1,

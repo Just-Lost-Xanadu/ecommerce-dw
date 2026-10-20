@@ -1,6 +1,6 @@
 # Airflow 只做调度层：跑批/质量/对账/看板。
 # 启动：docker compose -f docker-compose.airflow.yml up --build -d
-# 打开：http://127.0.0.1:8080  （admin / admin，演示用，生产必须改）
+# 打开：http://127.0.0.1:8081  （admin / admin，演示用，生产必须改）
 name: ecommerce-dw-airflow
 
 x-airflow-common: &airflow-common
@@ -70,7 +70,7 @@ services:
       airflow-init:
         condition: service_completed_successfully
     ports:
-      - "8080:8080"
+      - "8081:8080"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)"]
       interval: 30s
