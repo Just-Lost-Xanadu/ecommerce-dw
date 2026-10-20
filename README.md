@@ -66,7 +66,7 @@ python -m venv .venv
 | **DWS** | 轻度汇总（用户 × 天），供多指标共享 | `dws_traffic_user_1d`、`dws_trade_user_1d` |
 | **ADS** | 对外指标层，每个指标带口径说明 | `ads_daily_metrics`、`ads_gmv_category_1d`、`ads_funnel_1d` |
 
-**技术选型**：DuckDB（单文件、零部署的列式引擎）· SQL 优先 · 自写 runner 编排 · SQLite 存运行元数据 · 自渲染 HTML 看板。
+**技术选型**：DuckDB（单文件、零部署的列式引擎）· SQL 优先 · 自写 runner 编排（可选 Airflow 调度层）· SQLite 存运行元数据 · 自渲染 HTML 看板。
 
 ---
 
@@ -336,12 +336,34 @@ ecommerce-dw/
 │   ├── checks.py             # 对账与倾斜量化
 │   └── export_dashboard.py   # 离线 HTML 看板
 ├── sql/                      # 全部建表与加工 SQL（含设计理由注释）
+├── dags/                     # Airflow DAG（只做调度层，见 docs/airflow.md）
+├── Dockerfile.airflow        # Airflow 镜像：Airflow 环境与数仓 venv 隔离
+├── docker-compose.airflow.yml# Postgres + init + webserver + scheduler
 ├── spark/skew_experiment.py  # 倾斜对照实验（可选，见该文件说明）
 ├── tests/                    # 36 项测试
 ├── docs/                     # 指标口径 / 数据字典
 ├── dashboard/out/report.html # 看板产物（可离线打开）
 └── LICENSE                   # MIT
 ```
+
+---
+
+## 八点五、Airflow 调度（可选）
+
+项目本身不依赖 Airflow；它只是把已有的 `dw.cli` 包成一条可调度、可重试、可补数的 DAG：
+
+```bash
+python -m dw.cli gen                       # 可选；DAG 的 ensure_data 会自动造数
+docker compose -f docker-compose.airflow.yml up --build -d
+# http://127.0.0.1:8080   admin / admin（演示值，生产必须改）
+```
+
+DAG：`ensure_data → run → quality → recon → dashboard`。默认 `run --limit 1`（T+1）；
+在 Trigger DAG w/ config 里把 `full_refresh` 设为 `true` 才会跑完整窗口。
+
+**边界**：不把五层拆成五个 task（会绕过质量门禁、且 DuckDB 单写者会锁库）；
+`--limit 1` 的“最后一天”来自 `_baseline.json` 的 settle_date，不是 Airflow logical_date；
+失败回调只写日志，没有接企业微信/钉钉。详见 [`docs/airflow.md`](docs/airflow.md)。
 
 ---
 
@@ -376,11 +398,10 @@ python -m pytest -q          # 36 passed
   同时如实地记下：**这个量级下 Spark 只会比 DuckDB 慢**，固定开销占大头——
   所以结论是"知道什么时候该换"，而不是"我用了 Spark"。
 - **只有 T+1 批处理，没有实时链路**。Kafka + Flink 的实时 GMV 属于后续方向，未实现。
-- **调度是自写 runner，未上 Airflow / DolphinScheduler，也未接系统定时任务**。
-  理由：本项目只有 5 层线性依赖，自己实现一遍更能说明"依赖顺序、幂等、失败阻断"是怎么控制的。
-  `dw.cli run` 是**一次性前台命令**，定时触发（cron / 计划任务 / 调度平台）由使用者在外层挂——
-  仓库里没有、也不假装有定时任务的定义文件。生产环境下会评估现成调度系统
-  （它们本质上也是把依赖顺序、补数、幂等、告警这四件事产品化）。
+- **主线调度是自写 runner；另提供可选的 Airflow 调度层**（`dags/` + `docker-compose.airflow.yml`）。
+  主链路仍不依赖 Airflow：`dw.cli run` 是一次性前台命令，`runner.py` 负责依赖顺序、质量门禁和幂等；
+  Airflow 只在外层做定时、重试、补数入口和日志集中。**不把五层拆成五个 task**，因为那会绕过门禁，
+  且 DuckDB 单写者并发会锁库。详见 [`docs/airflow.md`](docs/airflow.md)。
 - **质量规则 12 条，未覆盖分布漂移与异常检测**。目前只有日环比波动这一条粗粒度监控；
   另外 `event_date_in_window` 在当前 ODS 结构下恒真（保留作为接入层守卫），见第四节说明。
 - **未做数据血缘可视化**，血缘只体现在 `_source_file` / `_batch_id` 两个元数据列上。

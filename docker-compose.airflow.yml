@@ -1,0 +1,93 @@
+# Airflow 只做调度层：跑批/质量/对账/看板。
+# 启动：docker compose -f docker-compose.airflow.yml up --build -d
+# 打开：http://127.0.0.1:8080  （admin / admin，演示用，生产必须改）
+name: ecommerce-dw-airflow
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile.airflow
+  image: ecommerce-dw-airflow:local
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+    AIRFLOW__CORE__FERNET_KEY: "GzCn5Mq6fx46vFfX7_hfF5LiLp3nRgnjCT5-ATZ8I-Q="
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
+    AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "30"
+    # 数仓项目路径：代码在镜像里，数据/看板挂宿主机，便于看产物
+    DW_ROOT: /opt/airflow/project
+    DW_DATA_DIR: /opt/airflow/project/data
+    DW_DASHBOARD_DIR: /opt/airflow/project/dashboard/out
+    TZ: Asia/Shanghai
+    PYTHONUNBUFFERED: "1"
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./data:/opt/airflow/project/data
+    - ./dashboard/out:/opt/airflow/project/dashboard/out
+    - airflow-logs:/opt/airflow/logs
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: ecommerce-dw-airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username admin --password admin \
+          --firstname Admin --lastname User \
+          --role Admin --email admin@example.com || true
+    restart: "no"
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: ecommerce-dw-airflow-web
+    command: webserver
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: ecommerce-dw-airflow-scheduler
+    command: scheduler
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  airflow-logs:
+  airflow-postgres:

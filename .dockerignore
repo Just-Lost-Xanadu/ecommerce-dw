@@ -1,0 +1,15 @@
+# Docker/Airflow 构建上下文：只送代码与依赖，不送本地数据、虚拟环境和缓存
+.git
+.gitignore
+.venv
+venv
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+tests/
+spark/
+data/
+dashboard/out/
+*.log

@@ -1,0 +1,23 @@
+# Airflow 调度镜像：Airflow 自带环境只负责调度；数仓依赖装在独立 venv。
+# 这样 Airflow 的 pandas 约束不会和本项目的 duckdb/pandas/numpy 版本打架。
+FROM apache/airflow:2.10.5-python3.12
+
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+USER airflow
+
+# 数仓依赖装在 /opt/airflow/dwvenv，与 Airflow 的 site-packages 隔离
+COPY requirements.txt /tmp/requirements.txt
+RUN python -m venv /opt/airflow/dwvenv \
+    && /opt/airflow/dwvenv/bin/pip install --no-cache-dir --upgrade pip \
+    && /opt/airflow/dwvenv/bin/pip install --no-cache-dir -r /tmp/requirements.txt
+
+COPY --chown=airflow:root pyproject.toml README.md /opt/airflow/project/
+COPY --chown=airflow:root src /opt/airflow/project/src
+COPY --chown=airflow:root sql /opt/airflow/project/sql
+COPY --chown=airflow:root docs /opt/airflow/project/docs
+RUN /opt/airflow/dwvenv/bin/pip install --no-cache-dir -e /opt/airflow/project
+
+COPY --chown=airflow:root dags /opt/airflow/dags
