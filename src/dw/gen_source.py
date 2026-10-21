@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -519,7 +520,9 @@ def generate(seed: int = 20261005, scale: float = 1.0) -> dict:
 
     stats = {
         "seed": seed,
-        "generated_at": "2026-10-05",
+        # 造数时间必须反映真实运行时刻：写死常量会让 _baseline.json 永远显示
+        # 2026-10-05，排查“这份数据是什么时候生成的”时被误导。
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         # 结算日由 gen_order 决定（未来日期注入会把基线整体前推），不能写死常量
         "settle_date": order_stats["settle_date"],
         "rows": {

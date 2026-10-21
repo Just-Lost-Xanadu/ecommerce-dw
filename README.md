@@ -1,6 +1,6 @@
 # 电商用户行为与订单离线数仓
 
-> **测试口径（2026-10-21 再精简后）**：`pytest -q` → kbase-agent **44 passed**、ecommerce-dw **32 passed**、mcp-tools **30 passed**，合计 **106**。README 内的历史段落保留更早版本的 77/51/38 与 60/40/30。
+> **测试口径（2026-10-21 再精简后）**：`pytest -q` → kbase-agent **40 passed**、ecommerce-dw **32 passed**、mcp-tools **30 passed**，合计 **102**。README 内的历史段落保留更早版本的 77/51/38、60/40/30、49/36/30。
 
 > 把埋点日志与订单数据加工成五层数仓（ODS / DIM / DWD / DWS / ADS），产出可复算的运营指标，
 > 并让**数据质量问题可见、可阻断、可解释**，让**重跑幂等、可验证**。
