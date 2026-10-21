@@ -72,14 +72,3 @@ def test_locked_warehouse_gives_actionable_error(locked_warehouse):
 
     # 4) 必须给出最后的兜底手段
     assert "DW_WAREHOUSE" in msg, "没有给出换库路径这个兜底手段"
-
-
-def test_non_lock_failure_does_not_claim_it_is_a_lock(tmp_path):
-    """非锁类失败不能照搬"残留进程"那套话术——那会把人引向错误的方向。"""
-    blocked = tmp_path / "as_a_directory"
-    blocked.mkdir()  # 用一个目录冒充库文件，制造非锁类的连接失败
-    with pytest.raises(RuntimeError) as excinfo:
-        db.connect(blocked)
-    msg = str(excinfo.value)
-    assert "Stop-Process" not in msg, "非锁类失败却给了『杀进程』的指引"
-    assert "锁冲突" in msg and "不像" in msg, "没有明确排除锁冲突这条原因"

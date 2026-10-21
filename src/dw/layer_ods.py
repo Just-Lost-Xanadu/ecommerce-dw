@@ -75,8 +75,12 @@ def run(
     for dt in dates:
         order_src = paths.dt_csv("order_info", dt)
         log_src = paths.dt_csv("user_log", dt)
+        # 订单与日志两侧都要报缺失：只记订单侧时，日志分区整段缺失会静默变成
+        # 流量层空数据，而告警里一个字都不会提。
         if not order_src.is_file():
-            missing.append(dt.isoformat())
+            missing.append(f"{dt.isoformat()}(order)")
+        if not log_src.is_file():
+            missing.append(f"{dt.isoformat()}(log)")
         rows_order += _load_one(
             con, "ods_order_info", "ods_order_info", order_src, dt, "order_date", batch_id
         )

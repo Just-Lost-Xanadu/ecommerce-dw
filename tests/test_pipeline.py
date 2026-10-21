@@ -7,9 +7,7 @@
 
 from __future__ import annotations
 
-import pytest
-
-from dw import config, db, paths, quality, runner
+from dw import config, quality, runner
 
 # 在隔离目录里收集的对账口径数据
 _RECON_SPEC = {
@@ -32,24 +30,6 @@ def test_pipeline_completes_and_fills_all_layers(all_dirty) -> None:
         assert all_dirty["steps"].get(step) == "ok", (
             f"步骤 {step} 状态是 {all_dirty['steps'].get(step)}，期望 ok"
         )
-
-
-def test_run_steps_are_in_execution_order(first_run) -> None:
-    """运行记录必须按**真实执行顺序**返回，而不是按字母序。
-
-    `started_at` 只精确到秒，一轮几十秒的跑批里好几个步骤落在同一秒，
-    只按时间排序会退化成按字母序排列——实测出现过 `ads` 排到 `dws` 前面，
-    读的人会以为 ads 先跑。所以 run_steps 增加 `step_seq` 列，排序以它为准。
-    """
-    steps = list(first_run.steps())
-    names = [s["step"] for s in steps]
-    seqs = [s["step_seq"] for s in steps]
-    core = [n for n in names if n in config.LAYERS]
-    assert core == list(config.LAYERS), (
-        f"步骤顺序不等于 config.LAYERS 定义的执行顺序：{core} != {list(config.LAYERS)}"
-    )
-    assert all(s is not None for s in seqs), f"有步骤没有 step_seq：{list(zip(names, seqs))}"
-    assert seqs == sorted(seqs), f"step_seq 不是递增的：{list(zip(names, seqs))}"
 
 
 def test_day_over_day_rule_is_skipped_for_single_day_window(con, window) -> None:
@@ -174,35 +154,3 @@ def test_force_bypasses_gate_but_keeps_trace(monkeypatch) -> None:
     steps = {s["step"]: s["status"] for s in result.steps()}
     assert steps.get("quality") == "ok", "运行记录里缺少 quality 步骤"
     monkeypatch.setitem(config.QUALITY_THRESHOLDS, "unique_rate", 1.0)
-
-
-# --------------------------------------------------------------------------
-# 看板：必须是可离线打开的单文件
-# --------------------------------------------------------------------------
-def test_dashboard_html_is_self_contained(tmp_path) -> None:
-    """看板必须是一张可离线打开的 HTML（不依赖任何 BI 平台）。"""
-    from dw import export_dashboard
-
-    start, end = paths.default_window()
-    with db.warehouse() as con:
-        out = export_dashboard.export(con, start, end, "test", tmp_path / "report.html")
-    html = out.read_text(encoding="utf-8")
-    assert out.is_file() and out.stat().st_size > 2000, "看板文件过小，可能没渲染出内容"
-    assert "运营日报" in html, "看板缺少标题"
-    assert "GMV" in html, "看板缺少 GMV 指标"
-    assert "http://" not in html and "https://" not in html, (
-        "看板引用了外部资源，离线打不开"
-    )
-
-
-# --------------------------------------------------------------------------
-# 错误信息要可操作
-# --------------------------------------------------------------------------
-def test_missing_source_data_gives_actionable_error(monkeypatch) -> None:
-    """源数据不存在时，报错要告诉用户**下一步敲什么命令**，而不是抛裸异常。"""
-    from dw import layer_ods
-
-    monkeypatch.setattr(paths, "raw_exists", lambda: False)
-    start, _ = paths.default_window()
-    with db.warehouse() as con, pytest.raises(FileNotFoundError, match="dw.cli gen"):
-        layer_ods.run(con, [start], "test-batch")

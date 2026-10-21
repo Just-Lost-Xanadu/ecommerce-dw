@@ -1,6 +1,6 @@
 # 电商用户行为与订单离线数仓
 
-> **测试口径（2026-10-18 再精简后）**：`pytest -q` → kbase-agent **49 passed**、ecommerce-dw **36 passed**、mcp-tools **30 passed**，合计 **115**。README 内的历史段落保留更早版本的 77/51/38 与 60/40/30。
+> **测试口径（2026-10-21 再精简后）**：`pytest -q` → kbase-agent **44 passed**、ecommerce-dw **32 passed**、mcp-tools **30 passed**，合计 **106**。README 内的历史段落保留更早版本的 77/51/38 与 60/40/30。
 
 > 把埋点日志与订单数据加工成五层数仓（ODS / DIM / DWD / DWS / ADS），产出可复算的运营指标，
 > 并让**数据质量问题可见、可阻断、可解释**，让**重跑幂等、可验证**。
@@ -340,7 +340,7 @@ ecommerce-dw/
 ├── Dockerfile.airflow        # Airflow 镜像：Airflow 环境与数仓 venv 隔离
 ├── docker-compose.airflow.yml# Postgres + init + webserver + scheduler
 ├── spark/skew_experiment.py  # 倾斜对照实验（可选，见该文件说明）
-├── tests/                    # 36 项测试
+├── tests/                    # 32 项测试
 ├── docs/                     # 指标口径 / 数据字典
 ├── dashboard/out/report.html # 看板产物（可离线打开）
 └── LICENSE                   # MIT
@@ -372,7 +372,7 @@ DAG：`ensure_data → run → quality → recon → dashboard`。默认 `run --
 ## 九、测试
 
 ```bash
-python -m pytest -q          # 36 passed
+python -m pytest -q          # 32 passed
 ```
 
 | 文件 | 覆盖 |
@@ -416,7 +416,7 @@ python -m pytest -q          # 36 passed
 ## 十一、环境
 
 Python 3.12（实测版本），依赖 `duckdb`、`pandas`、`numpy`（测试另需 `pytest`）。
-`requirements.txt` 用 `==` 锁死实测通过的版本组合——README 印的“36 passed”只有在同一套依赖下才可复现。
+`requirements.txt` 用 `==` 锁死实测通过的版本组合——README 印的“32 passed”只有在同一套依赖下才可复现。
 
 ```bash
 python -m venv .venv
