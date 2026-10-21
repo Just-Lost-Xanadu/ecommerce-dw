@@ -269,8 +269,8 @@ def run_quality(
                    out_of_window FROM d
         """),
         th["timeliness_rate"], False,
-        "当前 ODS 的 dt 由 log_date 派生，本规则**结构上恒真**（不构成有效防护）；"
-        "保留作为接入层改为「按文件分区名落 dt」之后的守卫",
+        "ODS 的 dt 现在落文件分区日期，log_date 才是业务日期；"
+        "本规则检查分区内是否混入窗口外的业务日期（迟到/错放）",
     )
 
     # ---- 8. 值域：行为事件的枚举合法 ----
@@ -312,21 +312,34 @@ def run_quality(
     # 它算的就是本轮的真实数字（与 dws_trade_user_1d 的 pay_amount 同口径，
     # 只是没做逐用户的 ROUND）。
     bad_days, comparable_pairs = con.execute(f"""
-        WITH daily AS (
+        WITH days AS (
+            -- 从日历表补齐窗口内每一天：旧写法只取"有 DWD 行的日期"，
+            -- 缺分区/某天 0 单时那一天会从 pairs 里消失，GMV 从正常掉到 0
+            -- 反而不会被发现。
+            SELECT date_key AS dt
+            FROM dim_date
+            WHERE date_key BETWEEN DATE '{start}' AND DATE '{end}'
+        ), daily AS (
             SELECT dt, sum(amount) AS gmv
             FROM dwd_order_detail
             WHERE dt BETWEEN DATE '{start}' AND DATE '{end}'
               AND is_valid AND is_paid
             GROUP BY dt
+        ), filled AS (
+            SELECT d.dt, coalesce(x.gmv, 0) AS gmv
+            FROM days d LEFT JOIN daily x USING (dt)
         ), pairs AS (
-            SELECT dt, gmv, lag(gmv) OVER (ORDER BY dt) AS prev FROM daily
+            SELECT dt, gmv, lag(gmv) OVER (ORDER BY dt) AS prev FROM filled
         )
         SELECT
             count(*) FILTER (
-                WHERE prev IS NOT NULL AND prev > 0
-                  AND abs(gmv - prev) * 1.0 / prev > {th['gmv_volatility']}
+                WHERE prev IS NOT NULL AND (
+                    (prev = 0 AND gmv > 0)
+                    OR (prev > 0
+                        AND abs(gmv - prev) * 1.0 / prev > {th['gmv_volatility']})
+                )
             ) AS bad_days,
-            count(*) FILTER (WHERE prev IS NOT NULL AND prev > 0) AS comparable_pairs
+            count(*) FILTER (WHERE prev IS NOT NULL) AS comparable_pairs
         FROM pairs
     """).fetchone()
     bad_days = int(bad_days or 0)
@@ -386,7 +399,14 @@ def run_quality(
     #   而是检查"送进来的数据里有没有超出今天的东西"。
     #   这也是真实数据平台的做法（数据接入前的边界校验），
     #   因为很多问题在入口挡住比在仓库里发现便宜得多。
-    ahead = _source_days_ahead(dates[-1])
+    # 结算日以造数时写入的 _baseline.json 为准，而不是"本轮窗口最后一天"：
+    # 回补一个较早的窗口时，窗口之后、但尚未到真正结算日的分区是合法数据，
+    # 用 dates[-1] 会把它们误报成"超前"。
+    try:
+        settle = date.fromisoformat(paths.load_baseline().get("settle_date") or "")
+    except (OSError, ValueError, TypeError):
+        settle = dates[-1]
+    ahead = _source_days_ahead(settle)
     results.append(
         RuleResult(
             layer="ods",

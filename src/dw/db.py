@@ -80,9 +80,10 @@ def connect(db_path: Path | None = None) -> duckdb.DuckDBPyConnection:
         con = duckdb.connect(str(path))
     except (duckdb.Error, OSError) as exc:
         raise RuntimeError(_connect_error(path, exc)) from exc
-    # 让 DuckDB 的字符串比较/排序按大小写不敏感语义走，
-    # 避免中文列值排序结果随环境（locale）不同而变化。
-    con.execute("SET default_collation = 'nocase'")
+    # 不设置全局 default_collation：DuckDB 的 `=`/GROUP BY 会遵守它，但
+    # count(DISTINCT)/窗口 PARTITION BY 仍按二进制比较，等于同一份 SQL 里混用
+    # 两套大小写语义（'O1'='o1' 为真，但 count(DISTINCT) 算 2）。
+    # 中文排序的确定性由二进制 collation 保证，不需要 nocase。
     # 关闭"保留插入顺序"。跑批场景下所有产出都是聚合结果或按 dt 分区读写的，
     # **没有任何一处依赖行的物理顺序**，而关闭它可以省掉 DuckDB 维护行序的开销
     # （在百万行级的写入上实测有可观收益）。
@@ -134,6 +135,7 @@ def tables_with_column(
 
 def prune_out_of_window(
     con: duckdb.DuckDBPyConnection, window_start, window_end,
+    tables: set[str] | None = None,
 ) -> dict[str, int]:
     """把"不属于当前统计窗口"的历史分区从各层表里删掉（幽灵分区清理）。
 
@@ -159,7 +161,10 @@ def prune_out_of_window(
     start, end = window_start.isoformat(), window_end.isoformat()
     where = f"dt < DATE '{start}' OR dt > DATE '{end}'"
     pruned: dict[str, int] = {}
-    for table in tables_with_column(con, "dt"):
+    candidates = tables_with_column(con, "dt")
+    if tables is not None:
+        candidates = [t for t in candidates if t in tables]
+    for table in candidates:
         n = int(
             con.execute(f"SELECT count(*) FROM {table} WHERE {where}").fetchone()[0]
         )

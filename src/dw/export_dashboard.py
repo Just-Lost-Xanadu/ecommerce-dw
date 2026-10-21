@@ -78,7 +78,7 @@ def _fmt_num(v: object) -> str:
 
 def _table(
     con: duckdb.DuckDBPyConnection, title: str, sql: str,
-    highlight: str | None = None,
+    highlight_value: str | None = None,
 ) -> str:
     cur = con.execute(sql)
     cols = [d[0] for d in cur.description]
@@ -87,8 +87,14 @@ def _table(
     body = []
     for r in rows:
         tds = []
-        for c, v in zip(cols, r, strict=True):
-            cls = ' class="hot"' if highlight and c == highlight and v not in (None, 0) else ""
+        for _c, v in zip(cols, r, strict=True):
+            # 按**单元格的值**高亮，而不是按列名：旧写法 `highlight="类目"`
+            # 会让所有类目行都变红，等于没有高亮。
+            cls = (
+                ' class="hot"'
+                if highlight_value is not None and str(v) == highlight_value
+                else ""
+            )
             tds.append(f"<td{cls}>{_fmt_num(v)}</td>")
         body.append("<tr>" + "".join(tds) + "</tr>")
     return (
@@ -139,7 +145,6 @@ def export(
         WHERE dt BETWEEN DATE '{start}' AND DATE '{end}'
         ORDER BY dt
         """,
-        highlight="Top1商品占比%",
     )
 
     category = _table(
@@ -151,7 +156,7 @@ def export(
         WHERE dt BETWEEN DATE '{start}' AND DATE '{end}'
         GROUP BY category ORDER BY GMV DESC
         """,
-        highlight="类目",
+        highlight_value="未知类目",
     )
 
     funnel = _table(
@@ -173,7 +178,7 @@ def export(
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(
         _TEMPLATE.format(
-            window_start=start, window_end=end, batch_id=batch_id,
+            window_start=start, window_end=end, batch_id=html.escape(str(batch_id)),
             generated_at=date.today().isoformat(),
             cards=cards, daily=daily, category=category, funnel=funnel,
         ),

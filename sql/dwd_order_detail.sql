@@ -6,7 +6,7 @@
 --     粒度必须在建表时定死，改粒度等于重建整条链）
 --
 -- 这一层做四件事：
---   ① 去重：同一 order_id 只保留一行（取最新落地的那条）——解决重复订单
+--   ① 去重：同一 order_id 只保留一行（优先保留脏行作为证据，见下）——解决重复订单
 --   ② 有效性判定：无效行**不删除，标记 reject_reason**——这样"少了多少"可解释
 --   ③ 类型与单位统一
 --   ④ 写审计表：把被剔除的原因分布落下来，供质量报告使用
@@ -51,12 +51,12 @@ DELETE FROM dwd_order_detail WHERE dt = DATE {dt};
 INSERT INTO dwd_order_detail
 WITH ranked AS (
     -- 去重键：order_id。同一单号出现多次时保留一行，排序规则如下：
-    --   ① _load_time DESC —— 优先保留"更晚进仓"的那份（常规去重语义）
-    --   ② user_id IS NULL DESC —— 主键字段缺失的行**排在最前面，优先留下来当证据**
-    --   ③ amount IS NULL DESC —— 同理，金额缺失的行也要留下
+    --   ① user_id IS NULL DESC —— 主键字段缺失的行**排在最前面，优先留下来当证据**
+    --   ② amount IS NULL DESC —— 同理，金额缺失的行也要留下
+    --   ③ _load_time DESC —— 常规去重语义：同等干净程度下保留更晚进仓的那份
     --   ④ amount DESC —— 其余情况按金额降序，保证结果确定（不依赖物理行序）
     --
-    -- 第 ②③ 条是这个项目踩过的一个真实坑，值得记下来：
+    -- 第 ①② 条（把脏行排在前面）是这个项目踩过的一个真实坑，值得记下来：
     --   原来写的是 `ORDER BY _load_time DESC, amount DESC NULLS LAST`。
     --   而同一批导入的重复行 _load_time 完全相同（同一个事务里写进去的），
     --   于是排序落到第二键，`NULLS LAST` 把"金额为空"的那一行排到后面，
@@ -70,9 +70,9 @@ WITH ranked AS (
         row_number() OVER (
             PARTITION BY order_id
             ORDER BY
-                _load_time DESC,
                 (user_id IS NULL) DESC,
                 (amount IS NULL) DESC,
+                _load_time DESC,
                 amount DESC
         ) AS rn
     FROM ods_order_info
@@ -104,7 +104,7 @@ SELECT
     (j.reject_reason IS NULL) AS is_valid,
     j.reject_reason,
     {batch_id} AS _batch_id,
-    j.order_date AS dt
+    DATE {dt} AS dt
 FROM judged j
 LEFT JOIN dim_sku s ON s.sku_id = j.sku_id;
 

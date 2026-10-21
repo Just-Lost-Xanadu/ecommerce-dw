@@ -37,8 +37,17 @@ def dt_csv(prefix: str, dt: date | str) -> Path:
 
 
 def raw_exists() -> bool:
-    """源数据是否已生成（用订单全量文件作为探针）。"""
-    return raw_csv(config.SRC_ORDER).is_file()
+    """源数据是否已生成。
+
+    不能只看全量 CSV：ODS 真正读的是 `data/raw/by_dt/` 下的分区文件。只探测全量文件时，
+    by_dt 被删空仍会判"数据已生成"，`run` 把每天当空分区、最后"成功"产出 0 行指标。
+    """
+    if not raw_csv(config.SRC_ORDER).is_file():
+        return False
+    by_dt = raw_dir()
+    return bool(list(by_dt.glob("order_info_*.csv"))) and bool(
+        list(by_dt.glob("user_log_*.csv"))
+    )
 
 
 def load_baseline() -> dict:

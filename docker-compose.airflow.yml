@@ -12,6 +12,9 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    # Airflow 2.10 默认新建 DAG 为 paused；不关掉的话首次启动后调度器不会跑，
+    # README 说的"起来即可调度"就不成立。
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
     AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
     AIRFLOW__CORE__FERNET_KEY: "GzCn5Mq6fx46vFfX7_hfF5LiLp3nRgnjCT5-ATZ8I-Q="
     AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"

@@ -27,6 +27,19 @@ from dw import (
     runlog,
 )
 
+# 幽灵分区清理分两批的原因：如果在 ODS 之后一次性清掉所有含 dt 的表，
+# 而本轮又在质量门禁被阻断，DWS/ADS 已被清空却不会重建——"指标表未更新"
+# 就变成了"指标表被清空"。所以先清原始/明细层（它们本来就要重建），
+# 等门禁真正通过后再清指标层。
+RAW_LAYER_TABLES = {
+    "ods_order_info", "ods_user_log",
+    "dwd_order_detail", "dwd_page_log", "dwd_order_reject_audit",
+}
+MART_LAYER_TABLES = {
+    "dws_traffic_user_1d", "dws_trade_user_1d",
+    "ads_daily_metrics", "ads_gmv_category_1d", "ads_funnel_1d",
+}
+
 
 @dataclass
 class RunResult:
@@ -118,8 +131,12 @@ def run_pipeline(
     """
     baseline = paths.load_baseline()
     default_start, default_end = paths.default_window(baseline)
-    if window_start is None or window_end is None:
-        window_start, window_end = default_start, default_end
+    # 两端分别回退：旧写法 `if start is None or end is None` 会把调用方只传的
+    # window_start 一并丢弃，静默跑成默认全窗口。
+    if window_start is None:
+        window_start = default_start
+    if window_end is None:
+        window_end = default_end
     if window_start > window_end:
         # 空窗口不会在任何一层里"自然报错"：ODS 会安静地加载 0 行，
         # dwd 取 dates[0] 时才抛一个和真实原因毫无关系的 IndexError。
@@ -240,6 +257,16 @@ def run_pipeline(
                             print("         处理方式：修源数据/修规则后重跑；"
                                   "或用 --force 强制出数（会在 trace 里留痕）。")
                         return result
+
+                    # 门禁通过（或 --force 放行）之后才清理窗口外的指标层分区：
+                    # 被阻断时旧指标表原样保留，不会被 prune 清空。
+                    if prune_out_of_window:
+                        pruned_mart = db.prune_out_of_window(
+                            con, window_start, window_end, tables=MART_LAYER_TABLES
+                        )
+                        if pruned_mart and verbose:
+                            total = sum(pruned_mart.values())
+                            print(f"[prune] 清理窗口外指标分区 {total:,} 行")
                     continue
 
                 with log.step(step) as st:
@@ -250,7 +277,9 @@ def run_pipeline(
                         # ODS 的"按 dt 分区先删后插"只能保证"这一天不写两遍"，
                         # 删不掉别的窗口留下的分区。清理行数记进本步的 message，
                         # 这样"这一轮到底删了什么"随时可查（dw.cli runs）。
-                        pruned = db.prune_out_of_window(con, window_start, window_end)
+                        pruned = db.prune_out_of_window(
+                            con, window_start, window_end, tables=RAW_LAYER_TABLES
+                        )
                         if pruned:
                             total_pruned = sum(pruned.values())
                             detail = ", ".join(

@@ -1,7 +1,7 @@
 -- ============================================================================
 -- ODS：行为日志原始落地
 -- ============================================================================
--- 与订单表同理：原样入仓 + 元数据列 + 按 dt 分区覆盖写。
+-- 与订单表同理：原样入仓 + 元数据列 + 按文件分区日期覆盖写。
 -- 注意这里也**不过滤**"超出统计窗口的迟到数据"——那是 DWD 的职责。
 -- ============================================================================
 
@@ -26,6 +26,5 @@ SELECT
     now()                          AS _load_time,
     {src_name}                     AS _source_file,
     {batch_id}                     AS _batch_id,
-    TRY_CAST(log_date AS DATE)     AS dt
-FROM read_csv({src}, header=true, all_varchar=true, sample_size=-1)
-WHERE TRY_CAST(log_date AS DATE) = DATE {dt};
+    DATE {dt}                      AS dt
+FROM read_csv({src}, header=true, all_varchar=true, sample_size=-1);

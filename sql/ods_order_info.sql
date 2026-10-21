@@ -8,8 +8,8 @@
 --   2. 清洗规则会变，源数据不会变——留着原样才能重跑新的清洗逻辑；
 --   3. 脏数据是**证据**。ODS 保留脏行，DWD 才标记剔除，这样"数据少了多少"是可解释的。
 --
--- 分区：按 {dt_col} 落到 dt 分区。**按分区覆盖写**是幂等的关键——
---      重跑同一天只替换那一天，不会产生重复数据。
+-- 分区：dt 落**文件分区日期**（不是 order_date），这样即使文件里混入错日期行也原样入仓；
+--      按分区覆盖写是幂等的关键：重跑同一天只替换那一天，不会产生重复数据。
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS ods_order_info (
@@ -42,6 +42,5 @@ SELECT
     now()                          AS _load_time,
     {src_name}                     AS _source_file,
     {batch_id}                     AS _batch_id,
-    TRY_CAST(order_date AS DATE)   AS dt
-FROM read_csv({src}, header=true, all_varchar=true, sample_size=-1)
-WHERE TRY_CAST(order_date AS DATE) = DATE {dt};
+    DATE {dt}                      AS dt
+FROM read_csv({src}, header=true, all_varchar=true, sample_size=-1);

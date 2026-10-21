@@ -82,7 +82,7 @@ with DAG(
         task_id="ensure_data",
         bash_command=(
             f"cd {PROJECT_DIR} && "
-            f"test -f data/raw/order_info.csv || {DW_PYTHON} -m dw.cli gen"
+            f"test -f data/raw/order_info.csv && ls data/raw/by_dt/order_info_*.csv >/dev/null 2>&1 && ls data/raw/by_dt/user_log_*.csv >/dev/null 2>&1 && test -f data/raw/_baseline.json || {DW_PYTHON} -m dw.cli gen"
         ),
         doc_md="首次部署时 data/ 是空的：没有源数据就先造数（含 9 类脏数据与对账基准）。",
     )

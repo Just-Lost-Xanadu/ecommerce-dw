@@ -29,7 +29,7 @@ SELECT
     log_id, user_id, sku_id, event,
     log_date, stay_seconds,
     {batch_id} AS _batch_id,
-    log_date   AS dt
+    DATE {dt}  AS dt
 FROM ods_user_log
 WHERE dt = DATE {dt}
   AND user_id IS NOT NULL

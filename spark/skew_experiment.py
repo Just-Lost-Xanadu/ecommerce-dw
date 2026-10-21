@@ -115,14 +115,14 @@ ORDER BY sku_id
 """
 
 
-def duckdb_baseline() -> None:
+def duckdb_baseline(warehouse: str | None = None) -> None:
     """验证：加盐两阶段聚合与直接聚合的结果必须完全一致。"""
     start, end = _window()
     print("=" * 72)
     print("A. DuckDB 对照：直接聚合 vs 加盐两阶段聚合")
     print("=" * 72)
 
-    with db.warehouse() as con:
+    with db.warehouse(warehouse) as con:
         direct = con.execute(
             DIRECT_SQL.format(start=start.isoformat(), end=end.isoformat())
         ).fetchall()
@@ -179,7 +179,7 @@ def spark_experiment(warehouse: str, start: str, end: str) -> None:
     export_dir.mkdir(parents=True, exist_ok=True)
     csv_path = export_dir / "orders.csv"
 
-    with db.warehouse() as con:
+    with db.warehouse(warehouse) as con:
         con.execute(
             f"""
             COPY (
@@ -290,7 +290,7 @@ def main() -> None:
     ap.add_argument("--warehouse", default=str(config.WAREHOUSE_DB))
     args = ap.parse_args()
 
-    duckdb_baseline()
+    duckdb_baseline(args.warehouse)
 
     if args.spark:
         start, end = _window()

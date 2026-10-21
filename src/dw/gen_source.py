@@ -159,7 +159,7 @@ def gen_order(
     df["amount"] = (df["quantity"] * df["unit_price"]).round(2)
 
     # 退款单（≈3%）：状态为 refunded，金额不计入净 GMV
-    n_refund = max(_DIRTY_MIN, int(n_order * 0.03))
+    n_refund = min(n_order, max(_DIRTY_MIN, int(n_order * 0.03)))
     refund_idx = rng.choice(df.index, n_refund, replace=False)
     df.loc[refund_idx, "order_status"] = "refunded"
 
@@ -485,8 +485,14 @@ _DIRTY_MIN = 2
 
 
 def _dirty_n(total: int, denom: int) -> int:
-    """按比例计算脏数据注入行数，保证至少 _DIRTY_MIN 行、且不超过总量。"""
-    return max(_DIRTY_MIN, min(total, total // denom))
+    """按比例计算脏数据注入行数，保证尽量有 _DIRTY_MIN 行、且**绝不超过总量**。
+
+    旧写法 `max(2, min(total, ...))` 在 total=1 时返回 2，随后
+    `rng.choice(..., 2, replace=False)` 直接抛 ValueError。极小 --scale 不该崩。
+    """
+    if total <= 0:
+        return 0
+    return min(total, max(_DIRTY_MIN, total // denom))
 
 
 def generate(seed: int = 20261005, scale: float = 1.0) -> dict:

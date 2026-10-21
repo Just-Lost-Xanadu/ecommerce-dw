@@ -38,6 +38,10 @@ CREATE TABLE IF NOT EXISTS ads_daily_metrics (
 );
 
 -- ---- 用户首次出现日期（用于判定新用户）----
+-- “首次”锚定在**仓库当前保留的历史**（DWS 全表）里，而不是只看本窗口：
+-- 这样“只补最后一天”与“全窗口重跑”得到同一个 new_users（幂等测试锁着这条性质）。
+-- 代价是空仓直接跑 --limit 1 时，当天所有人都会被算成新用户；README 已如实写明
+-- 这个口径边界，不声称它是“生命周期首次”。
 CREATE OR REPLACE TEMP TABLE _first_seen AS
 SELECT user_id, min(dt) AS first_dt
 FROM dws_traffic_user_1d

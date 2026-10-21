@@ -21,17 +21,27 @@ def _run_per_date(
     settle: date,
     window_start: date,
 ) -> None:
-    """按天执行模板（模板里已含 DELETE + INSERT，天然幂等）。"""
+    """按天执行模板（模板里已含 DELETE + INSERT，天然幂等）。
+
+    用事务包住一天里的 DELETE + INSERT：没有事务时，INSERT 失败/进程被杀会留下
+    "已经删了、还没写回"的空分区，直到人工重跑才恢复。
+    """
     for dt in dates:
-        con.execute(
-            paths.render(
-                template,
-                batch_id=batch_id,
-                dt=dt.isoformat(),
-                settle=settle.isoformat(),
-                window_start=window_start.isoformat(),
+        con.execute("BEGIN TRANSACTION")
+        try:
+            con.execute(
+                paths.render(
+                    template,
+                    batch_id=batch_id,
+                    dt=dt.isoformat(),
+                    settle=settle.isoformat(),
+                    window_start=window_start.isoformat(),
+                )
             )
-        )
+            con.execute("COMMIT")
+        except BaseException:
+            con.execute("ROLLBACK")
+            raise
 
 
 def run(
@@ -47,15 +57,21 @@ def run(
 
     # 页面日志：丢空 user_id + 丢窗口外迟到数据
     for dt in dates:
-        con.execute(
-            paths.render(
-                "dwd_page_log",
-                batch_id=batch_id,
-                dt=dt.isoformat(),
-                settle=window_end.isoformat(),
-                window_start=window_start.isoformat(),
+        con.execute("BEGIN TRANSACTION")
+        try:
+            con.execute(
+                paths.render(
+                    "dwd_page_log",
+                    batch_id=batch_id,
+                    dt=dt.isoformat(),
+                    settle=window_end.isoformat(),
+                    window_start=window_start.isoformat(),
+                )
             )
-        )
+            con.execute("COMMIT")
+        except BaseException:
+            con.execute("ROLLBACK")
+            raise
 
     start, end = dates[0].isoformat(), dates[-1].isoformat()
     order_total = int(con.execute(
