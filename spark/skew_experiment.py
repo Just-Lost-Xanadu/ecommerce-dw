@@ -115,6 +115,27 @@ ORDER BY sku_id
 """
 
 
+def _same_rows(a: list, b: list, tol: float = 1e-6) -> bool:
+    """逐行比较聚合结果：键必须完全一致，度量按**相对误差**比较。
+
+    为什么不能直接 `a == b`：这里是 DOUBLE 的 sum，加盐把行打散后
+    "相加顺序"变了，浮点末位可以差 1ulp（`0.1+0.2 != 0.3` 那个经典问题的放大版）。
+    全等断言会偶发 SystemExit，把一次正确的优化判成"改了语义"。
+    """
+    if len(a) != len(b):
+        return False
+    for ra, rb in zip(a, b, strict=True):
+        if ra[0] != rb[0]:
+            return False
+        for x, y in zip(ra[1:], rb[1:], strict=True):
+            if x is None or y is None:
+                if x != y:
+                    return False
+            elif abs(float(x) - float(y)) > tol * max(1.0, abs(float(x))):
+                return False
+    return True
+
+
 def duckdb_baseline(warehouse: str | None = None) -> None:
     """验证：加盐两阶段聚合与直接聚合的结果必须完全一致。"""
     start, end = _window()
@@ -137,7 +158,7 @@ def duckdb_baseline(warehouse: str | None = None) -> None:
             f"AND DATE '{end}' AND is_valid AND is_paid"
         ).fetchone()[0]
 
-    same = direct == salted
+    same = _same_rows(direct, salted)
     print(f"  参与聚合的订单行数 : {total:,}")
     print(f"  聚合分组数         : {len(direct):,}")
     print(f"  加盐桶数           : {SALT_BUCKETS}")
@@ -259,9 +280,10 @@ def spark_experiment(warehouse: str, start: str, end: str) -> None:
     )
     salted_rows = salted.collect()
 
-    same = [(r["sku_id"], r["cnt"], r["amt"]) for r in direct_rows] == [
-        (r["sku_id"], r["cnt"], r["amt"]) for r in salted_rows
-    ]
+    same = _same_rows(
+        [(r["sku_id"], r["cnt"], r["amt"]) for r in direct_rows],
+        [(r["sku_id"], r["cnt"], r["amt"]) for r in salted_rows],
+    )
     print(f"  两条路径结果一致   : {'✓ 是' if same else '✗ 否'}")
     if not same:
         raise SystemExit("Spark 下加盐两阶段聚合改变了结果")

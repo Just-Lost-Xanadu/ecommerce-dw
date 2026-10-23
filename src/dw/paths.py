@@ -69,7 +69,15 @@ def default_window(baseline: dict | None = None) -> tuple[date, date]:
     而"迟到数据"也无从判断——两者都需要一个参照点。
     """
     base = baseline or load_baseline()
-    settle = date.fromisoformat(base.get("settle_date") or "2026-10-05")
+    # 缺 settle_date 时**必须报错**，不能回退到一个写死的日期：回退之后窗口是对的
+    # 还是错的完全看不出来，最后表现为 "窗口内有 N 个源分区文件缺失"，
+    # 报错指向数据、实际是配置（老版本基准文件、手改过的基准文件都会踩）。
+    if not base.get("settle_date"):
+        raise ValueError(
+            f"对账基准里缺少 settle_date（{config.RAW_DIR / '_baseline.json'} 损坏或来自旧版本），"
+            "请重新生成：python -m dw.cli gen"
+        )
+    settle = date.fromisoformat(str(base["settle_date"]))
     return settle - timedelta(days=config.N_DAYS - 1), settle
 
 

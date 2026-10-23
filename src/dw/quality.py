@@ -110,22 +110,32 @@ def run_quality(
             )
         )
 
-    # ---- 1. 唯一性：订单号不重复（DWD 已去重，这里校验结论）----
+    # ---- 1. 唯一性：订单明细行不重复（DWD 已去重，这里校验结论）----
+    # 键是 (order_id, sku_id) —— 与 DWD 声明的粒度一致。
+    # 只用 order_id 的旧写法在"一单一商品"的造数下恰好等价，但接入多商品订单后
+    # 会把合法的一单多品判成重复，进而阻断整条 DWS/ADS 链路（阻断级规则）。
     add(
         "dwd", "unique_order_id", "dwd_order_detail",
         _scalar(con, f"""
-            WITH d AS (
-                SELECT count(*) AS n, count(DISTINCT order_id) AS u
+            WITH g AS (
+                SELECT order_id, sku_id, count(*) AS c
                 FROM dwd_order_detail
                 WHERE dt BETWEEN DATE '{start}' AND DATE '{end}'
+                GROUP BY 1, 2
             )
-            SELECT CASE WHEN n > 0 THEN u * 1.0 / n ELSE 1.0 END, n - u FROM d
+            SELECT CASE WHEN sum(c) > 0 THEN count(*) * 1.0 / sum(c) ELSE 1.0 END,
+                   sum(c) - count(*)
+            FROM g
         """),
         th["unique_rate"], True,
-        "订单号必须唯一（DWD 已按 order_id 去重，此处验证去重结论）",
+        "订单明细行必须唯一（键 = order_id + sku_id，DWD 已按同一键去重，此处验证去重结论）",
     )
 
     # ---- 2. 非空率：交易事实的 user_id ----
+    # 口径说明（别被规则名骗了）：分母是窗口内**全部** DWD 行（含已判无效的行），
+    # 所以算的是"全表 user_id 非空率"，不是"有效订单的非空率"。
+    # 后者在结构上恒为 1.0（is_valid 的定义就是 reject_reason IS NULL，而
+    # reject_reason 的第一个分支恰是 user_id IS NULL），做成规则等于没做。
     add(
         "dwd", "not_null_user_id", "dwd_order_detail",
         _scalar(con, f"""
@@ -138,7 +148,8 @@ def run_quality(
             SELECT CASE WHEN n > 0 THEN ok * 1.0 / n ELSE 1.0 END, n - ok FROM d
         """),
         th["not_null_rate"], True,
-        "有效订单必须有 user_id，否则无法归属到人",
+        "全表 user_id 非空率（含无效行）：缺失 user_id 的订单无法归属到人，"
+        "按注入量 200 行 / 18 万行 ≈ 0.11%，出厂数据上是 0.9989 通过",
     )
 
     # ---- 3. 值域：不允许出现「既被判为有效、金额又非正」的行 ----
@@ -179,7 +190,9 @@ def run_quality(
         _scalar(con, f"""
             WITH d AS (
                 SELECT count(*) AS n,
-                       count(*) FILTER (WHERE s.sku_id IS NULL) AS orphan
+                       -- o.sku_id IS NOT NULL：否则"源里 sku_id 本来就是 NULL"会被算成孤儿，
+                       -- 把归因指到错误的规则上（那句该由 orphan_sku 的源侧缺失规则负责）
+                       count(*) FILTER (WHERE o.sku_id IS NOT NULL AND s.sku_id IS NULL) AS orphan
                 FROM dwd_order_detail o
                 LEFT JOIN dim_sku s ON s.sku_id = o.sku_id
                 WHERE o.dt BETWEEN DATE '{start}' AND DATE '{end}' AND o.is_valid
@@ -199,7 +212,7 @@ def run_quality(
         _scalar(con, f"""
             WITH d AS (
                 SELECT count(*) AS n,
-                       count(*) FILTER (WHERE s.sku_id IS NULL) AS orphan
+                       count(*) FILTER (WHERE o.sku_id IS NOT NULL AND s.sku_id IS NULL) AS orphan
                 FROM ods_order_info o
                 LEFT JOIN dim_sku s ON s.sku_id = o.sku_id
                 WHERE o.dt BETWEEN DATE '{start}' AND DATE '{end}'
@@ -208,14 +221,20 @@ def run_quality(
         """),
         th["referential_ods_rate"], False,
         f"源侧孤儿率上限 {th['referential_ods_rate']:.2%}（越小越好）。"
-        "⚠️ 注意：孤儿行在 DWD **不会**被剔除（它的 is_valid 仍为 true，"
-        "只是关联不上维表），所以本规则的孤儿数与 orphan_sku_rate_dwd "
-        "**当前恒等**，两者的差值暂无信息量；等 DWD 开始剔除孤儿行，"
-        "它才会变得有意义",
+        "⚠️ 这两条孤儿规则**分母不同、不能直接相减**：本条分母是 ODS 全量行"
+        "（含 dup_order_id 克隆出的重复行与最终被判无效的行），"
+        "orphan_sku_rate_dwd 的分母只有 DWD 里 is_valid 的行；"
+        "孤儿行本身在 DWD 不会被剔除（is_valid 仍为 true，只是关联不上维表）",
         lower_is_better=True,
     )
 
-    # ---- 6. 跨表一致性：同一 user_id 的手机号必须唯一 ----
+    # ---- 6. 一致性：源侧同一用户多手机号时，dim_user 只能保留一行并标冲突 ----
+    # 口径说明（这条规则容易被误读成"在查 dim_user"）：它读的是**源 CSV**，
+    # 因为"同一个 user_id 有多个手机号"这个事实只存在于源里；dim_user 建了
+    # user_id 主键，从表内部永远看不出冲突（按 user_id 分组数手机号恒为 1.0）。
+    # dim 侧的处理是否正确（is_conflict 是否真的标上、是否只留一行）由
+    # tests/test_quality.py 按 dup_user_phone 注入数据端到端验证。
+    # 分母 = 源里出现过的用户数，影响行数 = 有多个手机号的用户数。
     add(
         "dim", "consistent_user_phone", "dim_user",
         _scalar(con, f"""
@@ -232,22 +251,25 @@ def run_quality(
             SELECT CASE WHEN n > 0 THEN ok * 1.0 / n ELSE 1.0 END, n - ok FROM d
         """),
         th["consistency_rate"], False,
-        "源系统里同一用户多个手机号：保留一条并标记 is_conflict，不静默取第一条",
+        "源系统里同一用户多个手机号 → 应保留一条并标记 is_conflict，不静默取第一条。"
+        "本规则的分子/分母都取自源 CSV（唯一能看见「一用户多手机号」的地方），"
+        "影响行数 = 源里手机号不止一个的用户数",
     )
 
     # ---- 7. 时效性：已加载分区里的事件日期必须落在统计窗口内 ----
     #
-    # ⚠️ **这条规则在当前数据模型下恒真**，如实说明原因：
-    #   sql/ods_user_log.sql 的加载语句是
-    #       WHERE TRY_CAST(log_date AS DATE) = DATE {dt}
-    #   且 dt := TRY_CAST(log_date AS DATE) —— 也就是说 **分区键 dt 就是由
-    #   log_date 派生出来的**，两者在结构上不可能不一致；再按 `dt BETWEEN 窗口`
-    #   过滤，log_date 必然落在窗口内，比值恒为 1.0（实测影响行数 0）。
+    # ⚠️ **这条规则在当前数据模型下恒真**，如实说明真实的机制（旧注释写错了一个前提，
+    #    说 ODS 用 `WHERE TRY_CAST(log_date AS DATE) = DATE {dt}` 加载——没有这回事）：
+    #   `sql/ods_user_log.sql:29` 落的是 `DATE {dt} AS dt`，dt 就是**文件的分区日期**
+    #   （由 src/dw/layer_ods.py 按文件名里的日期传进来），加载时**不按 log_date 过滤**。
+    #   于是"分区内混入窗口外的业务日期"只可能发生在：行被写进了错误日期的分区文件。
+    #   而迟到数据是**按真实事件日期切文件**的（src/dw/gen_source.py 的分区写入），
+    #   落在窗口外的分区文件里、ODS 按窗口只读窗口内文件，于是它们根本进不来。
+    #   结论：今天恒为 1.0，但原因不是"结构上不可能"，而是"加载范围把反例挡在外面"。
     #
-    #   保留它的理由：它是一个**接入层变更后的守卫**。真实数仓里 ODS 常常
-    #   按「文件所在的分区目录名」落 dt、事件日期另取一列，那时两者就可能错位
-    #   （分区标着 09-25、事件日期却是 10-03），这条规则会立刻生效。
-    #   要让它今天就有意义，ODS 必须同时保留「分区日期」和「事件日期」两个字段。
+    #   保留它的理由：它是一个**接入层变更后的守卫**。一旦加载改成"读全部分区再过滤"，
+    #   或者上游把错日期的行塞进窗口内的分区文件，这条规则会立刻生效。
+    #   要让它今天就有意义，ODS 必须保留"分区日期"和"事件日期"两个独立字段并交叉校验。
     #
     #   另外，迟到数据（late_arrival 注入的 600 行）落在窗口**之外**的分区文件里，
     #   ODS 按窗口加载，它们根本进不来——这是同一类"校验点选错位置"的盲区，

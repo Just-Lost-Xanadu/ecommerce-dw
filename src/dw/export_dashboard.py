@@ -150,7 +150,8 @@ def export(
     category = _table(
         con, "品类 GMV（关注「未知类目」——那是孤儿商品的可见出口）",
         f"""
-        SELECT category AS 类目, sum(order_cnt) AS 订单数, sum(sku_cnt) AS 商品件数,
+        SELECT category AS 类目, sum(order_cnt) AS "订单行数(跨类目不可加)",
+               sum(sku_cnt) AS 商品件数,
                round(sum(gmv), 0) AS GMV, sum(user_cnt) AS 用户数
         FROM ads_gmv_category_1d
         WHERE dt BETWEEN DATE '{start}' AND DATE '{end}'
@@ -158,6 +159,10 @@ def export(
         """,
         highlight_value="未知类目",
     )
+    # 列名带口径的原因：ads_gmv_category_1d.order_cnt 是 count(DISTINCT order_id)
+    # **按 (dt, category) 分组**算的，一单跨两个类目就被两处各计一次，
+    # 所以它跨类目求和无意义，也不能和顶部卡片「有效订单数」
+    # （sum(ads_daily_metrics.order_cnt)，已按订单去重）直接比较。
 
     funnel = _table(
         con, "转化漏斗（人数口径，同日行为）",

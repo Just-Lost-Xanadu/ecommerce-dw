@@ -95,8 +95,13 @@ with DAG(
 
     quality = BashOperator(
         task_id="quality",
-        bash_command=_dw("quality"),
-        doc_md="输出最近一次质量报告；非 0 退出会把任务标红。",
+        bash_command=_dw("quality {{ '' if params.full_refresh else '--limit 1' }}"),
+        doc_md=(
+            "输出最近一次质量报告；非 0 退出会把任务标红。"
+            "窗口必须与上面的 run 对齐（日批是 --limit 1）：固定按全窗口重算的话，"
+            "首次部署时 14 天里 13 天 GMV=0，会把'从 0 涨到正数'的那天判成 bad day，"
+            "结论与刚才的门禁相反。"
+        ),
     )
 
     recon = BashOperator(

@@ -165,7 +165,12 @@ class RunLog:
 
 
 def recent_runs(limit: int = 10, meta_path: object | None = None) -> list[sqlite3.Row]:
-    """最近几次跑批（按开始时间倒序）。"""
+    """最近几次跑批（按开始时间倒序）。
+
+    次级排序键 run_id DESC 是必需的：started_at 只到秒，测试/CI 里同一秒连跑两批时
+    只按 started_at 排，两次 `dw runs` 的输出顺序可能不一样（看起来像"结果不稳定"）；
+    run_id 以时间戳开头，同秒内按字典序即按真实先后。
+    """
     con = db.meta_connect(meta_path)  # type: ignore[arg-type]
     try:
         return list(
@@ -174,7 +179,8 @@ def recent_runs(limit: int = 10, meta_path: object | None = None) -> list[sqlite
                 "  sum(CASE WHEN status='ok' THEN 1 ELSE 0 END) AS ok_steps, "
                 "  sum(CASE WHEN status<>'ok' THEN 1 ELSE 0 END) AS bad_steps, "
                 "  sum(duration_ms) AS total_ms "
-                "FROM run_steps GROUP BY run_id ORDER BY started_at DESC LIMIT ?",
+                "FROM run_steps GROUP BY run_id "
+                "ORDER BY started_at DESC, run_id DESC LIMIT ?",
                 (limit,),
             )
         )

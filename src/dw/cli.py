@@ -98,9 +98,18 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_quality(args: argparse.Namespace) -> int:
     baseline = paths.load_baseline()
     start, end = paths.default_window(baseline)
+    # 默认是全窗口重算。加 --limit N 时按 T+1 日批的窗口算（最后 N 天）——
+    # 这条开关存在的原因：Airflow 日批是 `run --limit 1`，门禁在 1 天窗口上判；
+    # 紧接着的 quality task 如果固定按 14 天重算，两边结论可以相反
+    # （首次部署时 14 天里 13 天 GMV=0，会把"从 0 涨到正数"的那天判成 bad day）。
+    limit = getattr(args, "limit", 0)
+    if limit < 0:
+        raise SystemExit(f"--limit 必须 >= 0（0 表示全窗口），收到 {limit}")
+    if limit > 0:
+        start = max(start, date.fromordinal(end.toordinal() - limit + 1))
     with db.warehouse() as con:
         results = quality.run_quality(con, paths.dates_between(start, end))
-    _print_header("质量报告")
+    _print_header(f"质量报告（窗口 {start} ~ {end}）")
     print(quality.format_report(results))
     bad = quality.blocking_failures(results)
     if bad:
@@ -192,6 +201,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("quality", help="只输出质量报告")
+    p.add_argument("--limit", type=int, default=0,
+                   help="只统计窗口内最后 N 天（0 = 全窗口重算，默认）；"
+                        "与 `run --limit N` 对齐时用，避免两边窗口不同、结论相反")
     p.set_defaults(func=cmd_quality)
 
     p = sub.add_parser("recon", help="对账与倾斜量化")
