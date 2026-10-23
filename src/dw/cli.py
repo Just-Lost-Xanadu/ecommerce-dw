@@ -149,6 +149,11 @@ def cmd_tables(args: argparse.Namespace) -> int:
 
 
 def cmd_runs(args: argparse.Namespace) -> int:
+    # SQLite 的 LIMIT -1 表示"不限制"：负数会被静默当成"列出全部"，
+    # 而其他命令的 --limit 都是"必须 >= 0"。这里显式拒绝，避免同一个参数
+    # 在不同子命令里含义不一致。
+    if args.limit < 1:
+        raise SystemExit(f"--limit 必须 >= 1，收到 {args.limit}")
     _print_header("历史跑批")
     rows = runlog.recent_runs(limit=args.limit)
     if not rows:

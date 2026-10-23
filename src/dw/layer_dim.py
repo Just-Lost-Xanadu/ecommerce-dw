@@ -60,7 +60,16 @@ def run(
 
     n_sku = int(con.execute("SELECT count(*) FROM dim_sku").fetchone()[0])
     n_user = int(con.execute("SELECT count(*) FROM dim_user").fetchone()[0])
-    n_date = int(con.execute("SELECT count(*) FROM dim_date").fetchone()[0])
+    # 只数本窗口内的日期：dim_date 有意保留窗口外的历史日期（供回溯），
+    # 但 run_steps 的 out_rows 属于"本轮处理了多少"，把历史日期算进去会让
+    # `run --limit 1` 显示 date=14 这种与窗口不符的数字。
+    n_date = int(
+        con.execute(
+            "SELECT count(*) FROM dim_date "
+            "WHERE date_key BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)",
+            [window_start.isoformat(), window_end.isoformat()],
+        ).fetchone()[0]
+    )
     n_conflict = int(
         con.execute("SELECT count(*) FROM dim_user WHERE is_conflict").fetchone()[0]
     )
