@@ -57,8 +57,10 @@ def reconcile(
         WHERE dt BETWEEN DATE '{start}' AND DATE '{end}'
     """).fetchone()
 
+    # 订单数按 order_id 去重：DWD 的粒度是"一订单一行商品"，
+    # 接入多商品订单后 count(*) 会把一单多品算成多单，与基准的"单"不再同口径。
     dwd = con.execute(f"""
-        SELECT coalesce(sum(amount), 0), count(*)
+        SELECT coalesce(sum(amount), 0), count(DISTINCT order_id)
         FROM dwd_order_detail
         WHERE dt BETWEEN DATE '{start}' AND DATE '{end}'
           AND is_valid AND is_paid

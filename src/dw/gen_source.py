@@ -305,7 +305,10 @@ def gen_order(
 
     # ---- 对账基准：与 DWD 完全同口径 ----
     #
-    # 基准 = "唯一订单 且 已支付 且 金额有效 且 **user_id 非空**"，
+    # 基准 = "唯一订单明细行 且 已支付 且 金额有效 且 **user_id 非空**"，
+    # 去重键与 DWD 一致：**（order_id, sku_id）**。只用 order_id 在"一单一商品"的
+    # 造数下恰好等价，但 DWD 声明的粒度是"一订单一行商品"；接入多商品订单后，
+    # 按 order_id 去重会把同单多商品压成一行，基准与 DWD 就不再同口径。
     # 并且**去重时的取舍规则要和 DWD 一致**：
     # DWD 用 `(user_id IS NULL) DESC, (amount IS NULL) DESC` 把"有问题的行"排在前面当证据，
     # 所以基准也必须用同样的规则挑那一行。否则两边各自留了不同的行，差异率会凭空出现
@@ -327,11 +330,11 @@ def gen_order(
             _prio_amt=(df["amount"].isna()).astype(int),
         )
         .sort_values(
-            by=["order_id", "_prio_user", "_prio_amt", "amount"],
-            ascending=[True, False, False, False],
+            by=["order_id", "sku_id", "_prio_user", "_prio_amt", "amount"],
+            ascending=[True, True, False, False, False],
             kind="stable",
         )
-        .drop_duplicates(subset=["order_id"], keep="first")
+        .drop_duplicates(subset=["order_id", "sku_id"], keep="first")
     )
     dwd_aligned = (
         ordered.query("order_status == 'paid'")
@@ -340,7 +343,8 @@ def gen_order(
         .query("user_id == user_id")          # 与 DWD 的 is_valid 对齐：user_id 为空即无效
     )
 
-    stats["clean_orders"] = len(dwd_aligned)
+    # 业务订单数按 order_id 去重；GMV 仍按明细行求和（多商品订单每行都计入）。
+    stats["clean_orders"] = int(dwd_aligned["order_id"].nunique())
     # 与 DWS/ADS 一样收敛到分：不然对账时会出现"差 1e-9 元"这种噪声差异，
     # 让人误以为链路有问题（实测踩过：0.079% 的差异率全部来自这种末位误差）。
     stats["clean_gmv"] = round(float(dwd_aligned["amount"].sum()), 2)
