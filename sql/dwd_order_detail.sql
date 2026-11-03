@@ -96,6 +96,9 @@ judged AS (
         (order_status = 'paid') AS is_paid,
         CASE
             WHEN user_id IS NULL         THEN 'user_id_null'
+            -- 空日期必须显式判无效：否则它得到 reject_reason=NULL、is_valid=true，
+            -- 静默进入 GMV/DWS/ADS，而"未来日期"规则也看不到它（NULL 比较恒为 false）。
+            WHEN order_date IS NULL      THEN 'order_date_null'
             WHEN amount IS NULL          THEN 'amount_null'
             WHEN amount <= 0             THEN 'amount_not_positive'
             WHEN order_date > DATE {settle} THEN 'date_in_future'

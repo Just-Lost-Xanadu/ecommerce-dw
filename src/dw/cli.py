@@ -63,8 +63,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         # 直接在这里说不清楚。
         raise SystemExit(f"--limit 必须 >= 0（0 表示全窗口），收到 {args.limit}")
     if args.limit > 0:
-        # 模拟 T+1 日批：只跑窗口内最后 N 天
-        start = max(start, date.fromordinal(end.toordinal() - args.limit + 1))
+        # 模拟 T+1 日批：只跑窗口内最后 N 天。
+        # 先把 N 截到窗口长度：否则 --limit 999999999 会让 toordinal 运算抛
+        # "ordinal must be >= 1" 的裸 traceback，而这一层本应从容接受大 N。
+        n = min(args.limit, (end - start).days + 1)
+        start = max(start, date.fromordinal(end.toordinal() - n + 1))
     if args.prune and (start, end) != (default_start, end):
         # ⚠️ 这两个开关各自都合法，**凑在一起会静默删数据**：
         #   --limit N 把窗口收窄成最后 N 天；
@@ -106,7 +109,8 @@ def cmd_quality(args: argparse.Namespace) -> int:
     if limit < 0:
         raise SystemExit(f"--limit 必须 >= 0（0 表示全窗口），收到 {limit}")
     if limit > 0:
-        start = max(start, date.fromordinal(end.toordinal() - limit + 1))
+        n = min(limit, (end - start).days + 1)
+        start = max(start, date.fromordinal(end.toordinal() - n + 1))
     with db.warehouse() as con:
         results = quality.run_quality(con, paths.dates_between(start, end))
     _print_header(f"质量报告（窗口 {start} ~ {end}）")

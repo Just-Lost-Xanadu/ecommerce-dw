@@ -250,6 +250,10 @@ def run_pipeline(
                         remaining = config.LAYERS[config.LAYERS.index(step) + 1:]
                         for skipped in remaining:
                             log.record_skipped(skipped, reason)
+                        # 看板不在 config.LAYERS 里，但它本轮同样不会执行；
+                        # 不记一条 blocked，运行记录里会像"根本没要求生成看板"。
+                        if dashboard:
+                            log.record_skipped("dashboard", reason)
                         if verbose:
                             print(f"\n[BLOCKED] {reason}")
                             print(f"         下游（{'/'.join(remaining)}）已阻断，"

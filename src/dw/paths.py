@@ -42,8 +42,11 @@ def raw_exists() -> bool:
     不能只看全量 CSV：ODS 真正读的是 `data/raw/by_dt/` 下的分区文件。只探测全量文件时，
     by_dt 被删空仍会判"数据已生成"，`run` 把每天当空分区、最后"成功"产出 0 行指标。
     """
-    if not raw_csv(config.SRC_ORDER).is_file():
-        return False
+    # 维度源也要一起检查：只删 sku_info.csv / user_info.csv 时，旧实现仍判"已生成"，
+    # Airflow 的 ensure_data 不会重造，直到 layer_dim 才报"维度源文件不存在"。
+    for name in (config.SRC_ORDER, config.SRC_SKU, config.SRC_USER_INFO):
+        if not raw_csv(name).is_file():
+            return False
     by_dt = raw_dir()
     return bool(list(by_dt.glob("order_info_*.csv"))) and bool(
         list(by_dt.glob("user_log_*.csv"))

@@ -256,25 +256,18 @@ def run_quality(
         "影响行数 = 源里手机号不止一个的用户数",
     )
 
-    # ---- 7. 时效性：已加载分区里的事件日期必须落在统计窗口内 ----
+    # ---- 7. 时效性：分区日期必须与业务日期一致，且落在统计窗口内 ----
     #
-    # ⚠️ **这条规则在当前数据模型下恒真**，如实说明真实的机制（旧注释写错了一个前提，
-    #    说 ODS 用 `WHERE TRY_CAST(log_date AS DATE) = DATE {dt}` 加载——没有这回事）：
-    #   `sql/ods_user_log.sql:29` 落的是 `DATE {dt} AS dt`，dt 就是**文件的分区日期**
-    #   （由 src/dw/layer_ods.py 按文件名里的日期传进来），加载时**不按 log_date 过滤**。
-    #   于是"分区内混入窗口外的业务日期"只可能发生在：行被写进了错误日期的分区文件。
-    #   而迟到数据是**按真实事件日期切文件**的（src/dw/gen_source.py 的分区写入），
-    #   落在窗口外的分区文件里、ODS 按窗口只读窗口内文件，于是它们根本进不来。
-    #   结论：今天恒为 1.0，但原因不是"结构上不可能"，而是"加载范围把反例挡在外面"。
+    # ODS 的 `dt` 是**文件分区日期**（由 layer_ods 按文件名传入），`log_date` 才是业务日期。
+    # 因此这条规则必须同时检查三件事：
+    #   ① log_date 为空（下游 DWD 会因 BETWEEN 失败而丢掉它）；
+    #   ② log_date 与 dt 不一致（行被放进了错误日期的分区文件，DWS 会按 dt 多算/少算）；
+    #   ③ log_date 落在统计窗口之外。
+    # 旧实现只做了 ③，且窗口内的"错放一天"和 NULL 都会被判为通过——一条看起来在工作、
+    # 实际对最常见的分区错位完全无效的规则。
     #
-    #   保留它的理由：它是一个**接入层变更后的守卫**。一旦加载改成"读全部分区再过滤"，
-    #   或者上游把错日期的行塞进窗口内的分区文件，这条规则会立刻生效。
-    #   要让它今天就有意义，ODS 必须保留"分区日期"和"事件日期"两个独立字段并交叉校验。
-    #
-    #   另外，迟到数据（late_arrival 注入的 600 行）落在窗口**之外**的分区文件里，
-    #   ODS 按窗口加载，它们根本进不来——这是同一类"校验点选错位置"的盲区，
-    #   由 tests/test_quality.py::test_late_arrival_stays_out_of_window 在
-    #   源文件层面守着。
+    # 迟到数据（late_arrival 注入的 600 行）仍落在窗口**之外**的分区文件里；ODS 按窗口
+    # 加载，它们进不了数仓，所以这条规则看不到它们，由源文件层面的测试守着。
     add(
         "ods", "event_date_in_window", "ods_user_log",
         _scalar(con, f"""
@@ -282,7 +275,10 @@ def run_quality(
                 SELECT
                     count(*) AS total,
                     count(*) FILTER (
-                        WHERE log_date < DATE '{window_start}' OR log_date > DATE '{end}'
+                        WHERE log_date IS NULL
+                           OR log_date <> dt
+                           OR log_date < DATE '{window_start}'
+                           OR log_date > DATE '{end}'
                     ) AS out_of_window
                 FROM ods_user_log
                 WHERE dt BETWEEN DATE '{start}' AND DATE '{end}'

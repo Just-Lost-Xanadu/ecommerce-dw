@@ -341,6 +341,7 @@ def gen_order(
         .query("amount == amount")
         .query("amount > 0")
         .query("user_id == user_id")          # 与 DWD 的 is_valid 对齐：user_id 为空即无效
+        .query("order_date == order_date")    # 日期为空同样被判无效（DWD 新增 order_date_null）
     )
 
     # 业务订单数按 order_id 去重；GMV 仍按明细行求和（多商品订单每行都计入）。

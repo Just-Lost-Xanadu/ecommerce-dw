@@ -158,6 +158,13 @@ def duckdb_baseline(warehouse: str | None = None) -> None:
             f"AND DATE '{end}' AND is_valid AND is_paid"
         ).fetchone()[0]
 
+    if not total:
+        # 0 行时两条路径都是空集，_same_rows 会返回 True，脚本于是打印"结果一致 ✓"——
+        # 这不是验证成功，而是**窗口和指定的数仓对不上**。必须显式失败。
+        raise SystemExit(
+            f"指定数仓在窗口 {start} ~ {end} 内没有有效订单（0 行）。"
+            "请确认 --warehouse 与当前 _baseline.json 的 settle_date 是否属于同一批数据。"
+        )
     same = _same_rows(direct, salted)
     print(f"  参与聚合的订单行数 : {total:,}")
     print(f"  聚合分组数         : {len(direct):,}")
@@ -225,6 +232,11 @@ def spark_experiment(warehouse: str, start: str, end: str) -> None:
         """
     )
     direct_rows = direct.collect()
+    if not direct_rows:
+        raise SystemExit(
+            f"导出到 Spark 的订单为 0 行（窗口 {start} ~ {end}）。"
+            "请先跑完整链路，或检查 --warehouse / 结算日是否对得上。"
+        )
 
     # ---- 分区规模分布：长尾的直接证据 ----
     # 按 shuffle key 的哈希把行分到 8 个分区，看每个分区拿到多少行。
