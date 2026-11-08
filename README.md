@@ -1,4 +1,4 @@
-# 电商用户行为与订单离线数仓
+﻿# 电商用户行为与订单离线数仓
 
 > **测试口径（2026-11-08 复核）**：`pytest -q` → kbase-agent **40 passed**、ecommerce-dw **32 passed**、mcp-tools **30 passed**，合计 **102**。README 内的历史段落保留更早版本的 77/51/38、60/40/30、49/36/30。
 
@@ -8,7 +8,7 @@
 ## 数据源（2026-11-08：切换为真实数据集）
 
 主数据来自阿里天池 **UserBehavior**：`https://tianchi.aliyun.com/dataset/649`
-（`Dataset/UserBehavior.csv`，约 1 亿行、98.8 万用户、417 万商品，时间窗 2017-11-25 ~ 2017-12-03）。
+（`Dataset/UserBehavior.csv` 或 `data/UserBehavior.csv`，约 1 亿行、98.8 万用户、417 万商品，时间窗 2017-11-25 ~ 2017-12-03）。
 本仓库**不入库**这份 3.6GB 文件（见 `.gitignore`），下载后运行：
 
 ```bash
@@ -41,7 +41,7 @@ python -m venv .venv
 #      PowerShell: $env:PYTHONPATH = "src"
 
 # 3. 跑数
-.venv\Scripts\python.exe -m dw.cli gen --source taobao   # 天池真实数据（需 Dataset/UserBehavior.csv）
+.venv\Scripts\python.exe -m dw.cli gen --source taobao   # 天池真实数据（Dataset/ 或 data/ 下的 UserBehavior.csv）
 #   没有 Dataset 时用：python -m dw.cli gen               # auto 回退 synthetic
 .venv\Scripts\python.exe -m dw.cli run      # 跑完整链路：ODS → DIM → DWD → 质量门禁 → DWS → ADS → 看板
 .venv\Scripts\python.exe -m dw.cli recon    # 对账与倾斜量化（两个技术难点的实测证据）
@@ -90,7 +90,7 @@ python -m venv .venv
 
 ---
 
-## 三、为什么这么设计（面试最常追问的几点）
+## 三、为什么这么设计（关键设计取舍）
 
 ### 3.1 为什么要分层
 
@@ -244,7 +244,7 @@ python -m dw.cli recon
 未来日期订单落在窗口外分区、ODS 不加载，因此不再制造"边界残差"。
 
 > 历史故事保留：synthetic 模式下曾用"基准漏掉 `user_id` 非空"把 0.094% 修正到 0.029%，
-> 那次教训（**一个正确的解释会盖住其他错误**）仍然写在 `求职准备-数据开发版.md` 里；
+> 那次教训（**一个正确的解释会盖住其他错误**）已经写进 `docs/指标口径.md` 的口径变更记录；
 > 但对外引用当前数字时，以天池数据这一节为准。
 
 ### 6.2 倾斜：真实数据是长尾（193x），不是单键热点
@@ -359,7 +359,7 @@ ecommerce-dw/
 ├── Dockerfile.airflow        # Airflow 镜像：Airflow 环境与数仓 venv 隔离
 ├── docker-compose.airflow.yml# Postgres + init + webserver + scheduler
 ├── spark/skew_experiment.py  # 倾斜对照实验（可选，见该文件说明）
-├── Dataset/                  # 天池 UserBehavior.csv（3.6GB，本地，不入库）
+├── Dataset/                  # 天池 CSV（3.6GB，本地，不入库；也可放 data/）
 ├── tests/                    # 32 项测试
 ├── docs/                     # 指标口径 / 数据字典
 ├── dashboard/out/report.html # 看板产物（可离线打开）
@@ -435,7 +435,7 @@ python -m pytest -q          # 32 passed
 - **质量规则 12 条，未覆盖分布漂移与异常检测**。目前只有日环比波动这一条粗粒度监控；
   另外 `event_date_in_window` 现在检查的是"分区日期 vs 业务日期"，不再是恒真表达式；`source_days_within_boundary` 仅扫描订单分区，未来日期的日志分区仍不在它的覆盖范围内。
 - **未做数据血缘可视化**，血缘只体现在 `_source_file` / `_batch_id` 两个元数据列上。
-- **维度不做拉链表（SCD2）**，全量覆盖。需要历史状态回溯时见 [`docs/可选加分项.md`](docs/可选加分项.md)。
+- **维度不做拉链表（SCD2）**，全量覆盖。需要历史状态回溯时见 [`docs/扩展方向.md`](docs/扩展方向.md)。
 - **无鉴权、无多用户隔离**：本项目是单机演示，`data/` 目录即全部边界。
 - **看板是静态 HTML**，无交互筛选。用它做"离线可交付的产物"，不替代真实 BI 平台。
 
@@ -445,7 +445,7 @@ python -m pytest -q          # 32 passed
 
 Python 3.12（实测版本），依赖 `duckdb`、`pandas`、`numpy`（测试另需 `pytest`）。
 `requirements.txt` 用 `==` 锁死实测通过的版本组合——README 印的“32 passed”只有在同一套依赖下才可复现。
-真实数据模式另需把天池 `UserBehavior.csv` 放到 `Dataset/`（约 3.6GB，不入库），
+真实数据模式另需把天池 `UserBehavior.csv` 放到 `Dataset/` 或 `data/`（约 3.6GB，不入库），
 或用 `TAOBAO_DATASET` 指向文件路径。
 
 ```bash

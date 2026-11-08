@@ -1,6 +1,7 @@
 """把阿里天池 UserBehavior.csv 导入成本项目的四张源表。
 
 数据源：https://tianchi.aliyun.com/dataset/649
+文件位置：`Dataset/UserBehavior.csv` 或 `data/UserBehavior.csv`（均不入库）
 字段：user_id, item_id, category_id, behavior_type(pv/cart/fav/buy), timestamp(秒)
 
 为什么需要导入层：
@@ -42,11 +43,19 @@ _COLUMNS = {
 
 
 def dataset_path() -> Path:
-    """数据集路径：优先 TAOBAO_DATASET，其次项目根 Dataset/UserBehavior.csv。"""
+    """数据集路径：优先 TAOBAO_DATASET，其次 Dataset/，最后 data/。
+
+    两种放法都接受：`Dataset/UserBehavior.csv`（推荐，和 3.6GB 原始文件分开）
+    或 `data/UserBehavior.csv`（已经放在数据目录里的情况）。
+    """
     raw = os.getenv("TAOBAO_DATASET")
     if raw and raw.strip():
         p = Path(raw.strip()).expanduser()
         return p if p.is_absolute() else (config.ROOT / p).resolve()
+    for rel in (Path("Dataset") / "UserBehavior.csv", Path("data") / "UserBehavior.csv"):
+        p = (config.ROOT / rel).resolve()
+        if p.is_file():
+            return p
     return (config.ROOT / "Dataset" / "UserBehavior.csv").resolve()
 
 
