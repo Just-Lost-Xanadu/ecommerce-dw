@@ -46,7 +46,14 @@ def cmd_gen(args: argparse.Namespace) -> int:
     if source == "auto":
         # 本地有 Dataset/UserBehavior.csv 就用真实数据；没有就回退 synthetic，
         # 这样新 clone / Docker（不带 3.6GB 数据）仍然能一条命令跑通。
-        source = "taobao" if import_taobao.dataset_path().is_file() else "synthetic"
+        # 但显式传了 --scale（≠1.0）时必须走 synthetic：auto 若仍选 taobao，
+        # 下面的 "taobao 不支持 --scale" 会直接退出，README 里的 `gen --scale 0.05`
+        # 在放过数据集文件的机器上就永远跑不通（已实测）。
+        source = (
+            "taobao"
+            if args.scale == 1.0 and import_taobao.dataset_path().is_file()
+            else "synthetic"
+        )
 
     if source == "taobao":
         if args.scale != 1.0:
