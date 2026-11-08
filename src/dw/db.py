@@ -171,6 +171,22 @@ def prune_out_of_window(
         if n:
             con.execute(f"DELETE FROM {table} WHERE {where}")
             pruned[table] = n
+
+    # dim_date 用 date_key 而不是 dt，不在上面的通用候选里。换数据源后旧日历
+    # （例如 synthetic 的 2026 日期）会残留在 2017 窗口旁边，虽然不影响指标，
+    # 但 `dw.cli tables` 会看到两代日历。全窗口重建时一并清掉。
+    if tables is None or "dim_date" in tables:
+        date_where = (
+            f"date_key < DATE '{start}' OR date_key > DATE '{end}'"
+        )
+        n = int(
+            con.execute(
+                f"SELECT count(*) FROM dim_date WHERE {date_where}"
+            ).fetchone()[0]
+        )
+        if n:
+            con.execute(f"DELETE FROM dim_date WHERE {date_where}")
+            pruned["dim_date"] = n
     return pruned
 
 

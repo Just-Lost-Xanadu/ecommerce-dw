@@ -74,7 +74,7 @@ with DAG(
             False,
             type="boolean",
             title="全窗口重跑",
-            description="关闭：只跑窗口最后一天（T+1）；打开：跑完整 14 天窗口并清理窗口外分区",
+            description="关闭：只跑窗口最后一天（T+1）；打开：跑完整窗口（天池 9 天 / synthetic 14 天）并清理窗口外分区",
         ),
     },
 ) as dag:

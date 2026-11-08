@@ -81,7 +81,12 @@ def default_window(baseline: dict | None = None) -> tuple[date, date]:
             "请重新生成：python -m dw.cli gen"
         )
     settle = date.fromisoformat(str(base["settle_date"]))
-    return settle - timedelta(days=config.N_DAYS - 1), settle
+    # 真实天池数据集只有 9 天窗口，synthetic 造数器是 14 天。窗口长度写进基线，
+    # 让同一套 CLI / runner / 质量规则能服务两种数据源，而不是靠全局常量猜。
+    days = int(base.get("window_days") or config.N_DAYS)
+    if days < 1:
+        raise ValueError(f"对账基准里的 window_days 不合法：{days}")
+    return settle - timedelta(days=days - 1), settle
 
 
 def dates_between(start: date, end: date) -> list[date]:

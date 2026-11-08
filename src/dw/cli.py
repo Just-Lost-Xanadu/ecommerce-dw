@@ -19,7 +19,7 @@ import math
 import sys
 from datetime import date
 
-from dw import config, db, gen_source, paths, quality, runlog, runner
+from dw import config, db, gen_source, import_taobao, paths, quality, runlog, runner
 
 
 def _print_header(text: str) -> None:
@@ -42,13 +42,32 @@ def cmd_gen(args: argparse.Namespace) -> int:
     # 随后 run 要么拿旧数据算出错口径的指标、要么直接抛"找不到对账基准"。
     # 一个"写得到、读不到"的开关比没有这个开关更危险，所以直接去掉，
     # 换目录统一走 DW_DATA_DIR / DW_RAW_DIR。
-    stats = gen_source.generate(seed=args.seed, scale=args.scale)
-    _print_header("源数据生成完成")
+    source = args.source
+    if source == "auto":
+        # 本地有 Dataset/UserBehavior.csv 就用真实数据；没有就回退 synthetic，
+        # 这样新 clone / Docker（不带 3.6GB 数据）仍然能一条命令跑通。
+        source = "taobao" if import_taobao.dataset_path().is_file() else "synthetic"
+
+    if source == "taobao":
+        if args.scale != 1.0:
+            raise SystemExit(
+                "--source taobao 不支持 --scale；请用 --user-mod 控制采样规模"
+                "（默认 20，约 5 万用户）。"
+            )
+        stats = import_taobao.import_taobao(user_mod=args.user_mod)
+    else:
+        stats = gen_source.generate(seed=args.seed, scale=args.scale)
+
+    _print_header(f"源数据生成完成（{stats.get('source', source)}）")
     for k, v in stats["rows"].items():
-        print(f"  {k:<10} {v:>12,} 行")
-    print("  注入的脏数据：")
-    for k, v in stats["injected"].items():
-        print(f"    {k:<18} {v:>8,} 行")
+        print(f"  {k:<12} {v:>12,} 行")
+    if stats.get("injected"):
+        print("  注入的脏数据：")
+        for k, v in stats["injected"].items():
+            if k.endswith("_rate"):
+                print(f"    {k:<18} {v:>7.1%}")
+            else:
+                print(f"    {k:<18} {v:>8,} 行")
     print(f"  对账基准 clean_gmv = {stats['baseline']['clean_gmv']:,.2f}")
     return 0
 
@@ -133,7 +152,8 @@ def cmd_recon(args: argparse.Namespace) -> int:
             con, baseline["baseline"]["clean_gmv"],
             baseline["baseline"]["clean_orders"], start, end,
         )
-        skew = checks.skew_stats(con, config.HOT_SKU_ID, start, end)
+        hot_sku = (baseline.get("skew") or {}).get("hot_sku_id") or config.HOT_SKU_ID
+        skew = checks.skew_stats(con, hot_sku, start, end)
     _print_header("对账与倾斜")
     print(rec.format())
     print()
@@ -191,10 +211,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("gen", help="生成源数据（含脏数据注入）")
+    p = sub.add_parser("gen", help="生成/导入源数据（含脏数据注入）")
+    p.add_argument(
+        "--source",
+        choices=("auto", "taobao", "synthetic"),
+        default="auto",
+        help="auto=有天池数据集就用真实数据，否则 synthetic；taobao 需 Dataset/UserBehavior.csv",
+    )
     p.add_argument("--seed", type=int, default=20261005)
     p.add_argument("--scale", type=float, default=1.0,
-                   help="数据量缩放系数（测试用小样本，例如 0.02）")
+                   help="synthetic 的数据量缩放系数（测试用小样本，例如 0.02）")
+    p.add_argument(
+        "--user-mod",
+        type=int,
+        default=import_taobao.TAOBAO_DEFAULT_USER_MOD,
+        help="taobao 采样：只保留 user_id %% user_mod == 0 的用户（默认 20）",
+    )
     p.set_defaults(func=cmd_gen)
 
     p = sub.add_parser("run", help="跑完整链路")

@@ -11,5 +11,6 @@ __pycache__/
 tests/
 spark/
 data/
+Dataset/
 dashboard/out/
 *.log

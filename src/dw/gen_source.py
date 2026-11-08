@@ -530,6 +530,8 @@ def generate(seed: int = 20261005, scale: float = 1.0) -> dict:
     n_log_parts = _write_partitions(log, out, "user_log", "log_date")
 
     stats = {
+        "source": "synthetic",
+        "window_days": N_DAYS,
         "seed": seed,
         # 造数时间必须反映真实运行时刻：写死常量会让 _baseline.json 永远显示
         # 2026-10-05，排查“这份数据是什么时候生成的”时被误导。

@@ -1,5 +1,7 @@
 # 运行期产物：数据、数仓文件、日志，一律不入库
 data/
+# 天池 UserBehavior.csv（3.6GB，本地下载，不入库）
+Dataset/
 *.duckdb
 *.duckdb.wal
 *.sqlite

@@ -151,7 +151,7 @@ def export(
     # 后者的 user_cnt 是"每天、每个类目"的去重人数，跨天相加得到的是人次；
     # 当前数据里面板会显示 159,821，而窗口内真实去重买家只有 19,995。
     category = _table(
-        con, "品类 GMV（关注「未知类目」——那是孤儿商品的可见出口）",
+        con, "品类 GMV Top 20（「未知类目」是孤儿商品的可见出口）",
         f"""
         SELECT coalesce(s.category, '未知类目') AS 类目,
                count(DISTINCT o.order_id) AS "订单行数(跨类目不可加)",
@@ -162,7 +162,7 @@ def export(
         LEFT JOIN dim_sku s ON s.sku_id = o.sku_id
         WHERE o.dt BETWEEN DATE '{start}' AND DATE '{end}'
           AND o.is_valid AND o.is_paid
-        GROUP BY 1 ORDER BY GMV DESC
+        GROUP BY 1 ORDER BY GMV DESC LIMIT 20
         """,
         highlight_value="未知类目",
     )

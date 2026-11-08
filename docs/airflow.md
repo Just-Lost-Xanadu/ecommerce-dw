@@ -48,7 +48,8 @@ ensure_data → run → quality → recon → dashboard
 **日常 vs 补数**：
 
 - 默认 `full_refresh=false` → `run --limit 1`，只跑窗口最后一天；
-- 在 Airflow 的 **Trigger DAG w/ config** 里把 `full_refresh` 设为 `true` → 跑完整 14 天窗口，
+- 在 Airflow 的 **Trigger DAG w/ config** 里把 `full_refresh` 设为 `true` → 跑完整窗口
+  （天池数据 9 天 / synthetic 14 天，由 `_baseline.json.window_days` 决定），
   并清理窗口外分区（这是本项目自己的补数/清幽灵分区入口）。
 
 ## 已知边界（不要吹成生产调度）

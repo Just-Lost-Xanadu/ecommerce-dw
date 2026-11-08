@@ -38,6 +38,10 @@ RAW_LAYER_TABLES = {
 MART_LAYER_TABLES = {
     "dws_traffic_user_1d", "dws_trade_user_1d",
     "ads_daily_metrics", "ads_gmv_category_1d", "ads_funnel_1d",
+    # 日期维度也只在全窗口权威重建时清窗口外：换数据源（如从 synthetic 切到
+    # 天池 2017 数据）后，旧日期的 dim_date 会残留，虽然不影响窗口内指标，
+    # 但 `dw.cli tables` 会看到 23 行这种"两代日历"，排查时非常误导。
+    "dim_date",
 }
 
 
