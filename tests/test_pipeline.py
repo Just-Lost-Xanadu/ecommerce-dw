@@ -120,7 +120,7 @@ def test_skew_is_real_in_generated_data(iso_project) -> None:
 # --------------------------------------------------------------------------
 # 质量门禁（在共享数仓上跑，但每个用例都恢复原状）
 # --------------------------------------------------------------------------
-def test_quality_gate_blocks_downstream_when_rule_fails(monkeypatch) -> None:
+def test_quality_gate_blocks_downstream_when_rule_fails(monkeypatch, baseline) -> None:
     """门禁测试：把阈值调到不可能达到，下游必须被阻断。
 
     这是"质量校验"与"质量**门禁**"的区别——
@@ -145,7 +145,7 @@ def test_quality_gate_blocks_downstream_when_rule_fails(monkeypatch) -> None:
     assert not ok.blocked, "恢复阈值后链路仍被阻断"
 
 
-def test_force_bypasses_gate_but_keeps_trace(monkeypatch) -> None:
+def test_force_bypasses_gate_but_keeps_trace(monkeypatch, baseline) -> None:
     """--force 是应急通道：能出数，但必须在运行记录里留下"门禁没过"的痕迹。"""
     monkeypatch.setitem(config.QUALITY_THRESHOLDS, "unique_rate", 1.000001)
     result = runner.run_pipeline(force=True, verbose=False)

@@ -52,6 +52,11 @@ def dataset_path() -> Path:
     if raw and raw.strip():
         p = Path(raw.strip()).expanduser()
         return p if p.is_absolute() else (config.ROOT / p).resolve()
+    # 先看配置的数据目录（DW_DATA_DIR 覆盖后的 config.DATA_DIR），再看项目根的
+    # Dataset/ 与 data/ 旧路径。只认 ROOT/data 会漏掉 DW_DATA_DIR 指向的数据盘。
+    configured = config.DATA_DIR / "UserBehavior.csv"
+    if configured.is_file():
+        return configured
     for rel in (Path("Dataset") / "UserBehavior.csv", Path("data") / "UserBehavior.csv"):
         p = (config.ROOT / rel).resolve()
         if p.is_file():
@@ -201,6 +206,13 @@ def import_taobao(
         """)
 
         base_order_rows = int(con.execute("SELECT count(*) FROM base_orders").fetchone()[0])
+        if base_order_rows == 0:
+            # 采样后可能一条 buy 都没有（user_mod 太大 / 输入文件太小）。
+            # 不在这里拦住，下面按 order 派生的产物会得到空表，热点 SKU 的
+            # fetchone() 返回 None，最终以一个和真实原因无关的 TypeError 崩掉。
+            raise RuntimeError(
+                f"采样后没有 buy 事件（user_mod={user_mod}）。请调小 user_mod 或检查数据集。"
+            )
 
         # 注入量按真实 buy 事件数等比缩放，而不是写死固定条数：
         # 否则 --user-mod 调大（样本变小）时，固定 200 行空 user_id 会从 0.1% 变成 2%，
@@ -309,10 +321,12 @@ def import_taobao(
             "SELECT (SELECT count(*) FROM users), "
             "(SELECT count(*) FROM items), (SELECT count(*) FROM log_rows)"
         ).fetchone()
-        hot_sku, hot_rows = con.execute(
+        hot = con.execute(
             "SELECT sku_id, count(*) AS n FROM base_orders "
             "WHERE order_status = 'paid' GROUP BY 1 ORDER BY n DESC, sku_id LIMIT 1"
         ).fetchone()
+        # 全部 buy 都被判定为 refunded 时这里没有行：不能直接解包 None。
+        hot_sku, hot_rows = hot if hot else (config.HOT_SKU_ID, 0)
         raw_rows, raw_gmv = con.execute(
             "SELECT count(*), round(coalesce(sum(amount), 0), 2) FROM order_rows"
         ).fetchone()
