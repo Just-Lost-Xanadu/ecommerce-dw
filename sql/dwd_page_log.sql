@@ -25,13 +25,25 @@ CREATE TABLE IF NOT EXISTS dwd_page_log (
 
 DELETE FROM dwd_page_log WHERE dt = DATE {dt};
 
+-- 去重：一个 log_id 是**一次事件**的唯一标识，源日志重复上报（客户端重试、采集端
+-- 至少一次投递）时会落两行。不去重的话 UV 不受影响（DISTINCT user_id），但
+-- `ads_funnel_1d` 的加购/收藏/下单**次数**会翻倍——漏斗第二步就假了。
+-- 保留规则定成确定序（先按 stay_seconds 大、再按 log_date 新），保证同一份源
+-- 两次跑批留下同一行，否则幂等测试会偶发失败。ods_user_log 没去重是有意的：
+-- ODS 是原始层，只做"这天不写两遍"，脏数据留给这里收口。
 INSERT INTO dwd_page_log
-SELECT
-    log_id, user_id, sku_id, event,
-    log_date, stay_seconds,
-    {batch_id} AS _batch_id,
-    DATE {dt}  AS dt
-FROM ods_user_log
-WHERE dt = DATE {dt}
-  AND user_id IS NOT NULL
-  AND log_date BETWEEN DATE {window_start} AND DATE {settle};
+SELECT log_id, user_id, sku_id, event, log_date, stay_seconds,
+       {batch_id} AS _batch_id, DATE {dt} AS dt
+FROM (
+    SELECT
+        log_id, user_id, sku_id, event, log_date, stay_seconds,
+        row_number() OVER (
+            PARTITION BY log_id
+            ORDER BY stay_seconds DESC NULLS LAST, log_date DESC
+        ) AS _rn
+    FROM ods_user_log
+    WHERE dt = DATE {dt}
+      AND user_id IS NOT NULL
+      AND log_date BETWEEN DATE {window_start} AND DATE {settle}
+)
+WHERE _rn = 1;

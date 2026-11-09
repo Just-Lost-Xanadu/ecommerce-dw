@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -140,10 +141,17 @@ def create_tables(con, *names: str) -> None:
 
     注意要先剥掉前导注释行：模板开头都有大段 `--` 说明，
     直接 `startswith("CREATE TABLE")` 会全部匹配不上（这个坑踩过一次）。
+
+    **注释里的分号不能当分隔符**：原来的 `sql(name).split(";")` 遇到
+    `-- 分号; 说明` 这类注释就把一条 CREATE 劈成两半，后半段不以 CREATE 开头被静默
+    丢弃——建表"看起来成功"，实际少一张表。所以先用正则按 `CREATE TABLE … );`
+    的形状抠出 DDL（注释行先剥掉），INSERT 段里的 `{src}` 之类占位符根本不会被解析，
+    也就不会因为它们去执行未渲染的模板。
     """
+    pattern = re.compile(r"CREATE\s+TABLE[\s\S]*?\)\s*;", re.IGNORECASE)
     for name in names:
-        for chunk in sql(name).split(";"):
-            body = _strip_leading_comments(chunk)
+        for match in pattern.finditer(sql(name)):
+            body = _strip_leading_comments(match.group(0)).rstrip(";").strip()
             if body.upper().startswith("CREATE TABLE"):
                 con.execute(body)
 

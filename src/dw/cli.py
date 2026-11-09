@@ -165,6 +165,27 @@ def cmd_recon(args: argparse.Namespace) -> int:
     print(rec.format())
     print()
     print(skew.format())
+
+    # 对账是**门禁**，不是报表。旧实现无条件 return 0：DAG 里 recon 这一步
+    # 永远是绿的，GMV 差 5% 也照样往下跑，只有人肉去看 stdout 才会发现。
+    # 容差取 0.01%（不到 1 万元 / 亿元级），比"逐分一致"宽、但足以抓住
+    # 退款剔除错、去重键错、窗口错这类会带来 0.1% 以上偏差的真问题。
+    tolerance = getattr(args, "tolerance", 0.01)
+    diff = abs(rec.dwd_diff_pct)
+    order_diff = abs(rec.dwd_orders - rec.baseline_orders)
+    if diff > tolerance:
+        print(
+            f"\n[FAIL] DWD 收口后 GMV 与基准差 {rec.dwd_diff_pct:+.3f}%，"
+            f"超出容差 {tolerance:.3f}%。"
+        )
+        return 3
+    if order_diff:
+        print(
+            f"\n[FAIL] DWD 收口后订单数 {rec.dwd_orders:,} 与基准 "
+            f"{rec.baseline_orders:,} 差 {order_diff:,} 单。"
+        )
+        return 3
+    print(f"\n对账通过（GMV 容差 {tolerance:.3f}%，订单数需完全一致）。")
     return 0
 
 
@@ -254,7 +275,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "与 `run --limit N` 对齐时用，避免两边窗口不同、结论相反")
     p.set_defaults(func=cmd_quality)
 
-    p = sub.add_parser("recon", help="对账与倾斜量化")
+    p = sub.add_parser("recon", help="对账与倾斜量化（有门禁语义：偏差超容差退 3）")
+    p.add_argument(
+        "--tolerance", type=float, default=0.01,
+        help="DWD 收口后 GMV 与基准的允许偏差（百分比，默认 0.01）",
+    )
     p.set_defaults(func=cmd_recon)
 
     p = sub.add_parser("tables", help="列出数仓表与行数")

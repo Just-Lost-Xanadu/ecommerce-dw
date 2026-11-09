@@ -64,17 +64,20 @@ def _source_days_ahead(settle: date) -> int:
 
     在**文件系统层面**检查，而不是查数仓：这些数据根本没被加载进来，
     数仓里查不到（见规则 11 的说明）。
+
+    **两张源表都要数**：规则名是"源分区文件不超出结算日"，只 glob
+    `order_info_*.csv` 时，`user_log_*.csv` 里 12 月的前瞻分区完全不会被发现，
+    规则会报 0 个超前——比漏报更糟的是它看起来"通过了"。
     """
-    prefix = "order_info"
-    pattern = f"{prefix}_*.csv"
     ahead = 0
-    for path in paths.raw_dir().glob(pattern):
-        stamp = path.stem[len(prefix) + 1:]
-        try:
-            if date.fromisoformat(stamp) > settle:
-                ahead += 1
-        except ValueError:
-            continue
+    for prefix in ("order_info", "user_log"):
+        for path in paths.raw_dir().glob(f"{prefix}_*.csv"):
+            stamp = path.stem[len(prefix) + 1:]
+            try:
+                if date.fromisoformat(stamp) > settle:
+                    ahead += 1
+            except ValueError:
+                continue
     return ahead
 
 
