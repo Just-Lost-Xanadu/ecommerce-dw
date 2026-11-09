@@ -113,6 +113,13 @@ def export(
     start, end = window_start.isoformat(), window_end.isoformat()
 
     # ---- 顶部卡片：窗口内汇总 ----
+    # 注意这一行里两种口径并存，是有意的，但**标签必须说清**：
+    #   · AOV 用 sum/sum 加权（窗口 GMV ÷ 窗口订单数）——比值型指标的分子分母都可加，
+    #     所以加权才是正确聚合；
+    #   · 支付转化率用 `avg(pay_conversion)`，是**各日转化率的算术平均**，不是
+    #     sum(pay_users)/sum(visit_users)（后者把人日当人次相加，同一用户跨天会重复计数）。
+    # 早先标签只写"支付转化率（平均）"，容易被读成"窗口整体的转化率"，
+    # 和旁边加权的 AOV 摆在一起显得口径不一致。这里把口径直接写进标签。
     summary = con.execute(f"""
         SELECT
             coalesce(sum(gmv), 0)                                  AS gmv,
@@ -128,7 +135,7 @@ def export(
         f'<div class="card"><div class="k">窗口 GMV（净，已去重去退款）</div><div class="v">¥{summary[0]:,.0f}</div></div>'
         f'<div class="card"><div class="k">有效订单数</div><div class="v">{summary[1]:,.0f}</div></div>'
         f'<div class="card"><div class="k">日均 DAU</div><div class="v">{summary[2]:,.0f}</div></div>'
-        f'<div class="card"><div class="k">支付转化率（平均）</div><div class="v">{summary[3]:.2f}%</div></div>'
+        f'<div class="card"><div class="k">支付转化率（各日平均）</div><div class="v">{summary[3]:.2f}%</div></div>'
         f'<div class="card"><div class="k">客单价 AOV</div><div class="v">¥{summary[4]:,.2f}</div></div>'
         "</div>"
     )

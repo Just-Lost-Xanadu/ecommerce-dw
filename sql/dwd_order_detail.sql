@@ -62,7 +62,13 @@ WITH ranked AS (
     --   ① user_id IS NULL DESC —— 主键字段缺失的行**排在最前面，优先留下来当证据**
     --   ② amount IS NULL DESC —— 同理，金额缺失的行也要留下
     --   ③ _load_time DESC —— 常规去重语义：同等干净程度下保留更晚进仓的那份
-    --   ④ amount DESC —— 其余情况按金额降序，保证结果确定（不依赖物理行序）
+    --   ④ amount DESC 及之后的业务列 —— 其余情况按金额降序
+    --   ⑤ 末级再补 order_status / quantity / order_date —— **必须是全序**。
+    --      第 ④ 条之后仍有并列：_load_time 是**事务时间戳**（同一批加载全表同值），
+    --      而 amount 已在 ④ 排过；若同一个 (order_id, sku_id) 出现"一条 paid、一条 refunded"
+    --      且金额相等，胜出者就由 DuckDB 的扫描顺序决定——两次跑批可能各留一条，
+    --      GMV 差一单，而幂等测试只比 (order_id, sku_id, amount)，抓不到这种漂移。
+    --      补上这三列让排序键在全列的语义上唯一，去重才是可复现的。
     --
     -- 第 ①② 条（把脏行排在前面）是这个项目踩过的一个真实坑，值得记下来：
     --   原来写的是 `ORDER BY _load_time DESC, amount DESC NULLS LAST`。
@@ -81,7 +87,10 @@ WITH ranked AS (
                 (user_id IS NULL) DESC,
                 (amount IS NULL) DESC,
                 _load_time DESC,
-                amount DESC
+                amount DESC,
+                order_status,
+                quantity,
+                order_date
         ) AS rn
     FROM ods_order_info
     WHERE dt = DATE {dt}
@@ -95,6 +104,11 @@ judged AS (
         order_date, order_status, channel,
         (order_status = 'paid') AS is_paid,
         CASE
+            -- 主键缺失要先判：order_id 为 NULL 的行如果放行成 is_valid，
+            -- GMV（sum(amount)）会把它算进去，但订单数走 count(DISTINCT order_id)
+            -- **忽略 NULL** —— 于是订单数少计、AOV 虚高，而质量规则只有那一条
+            -- "订单明细行唯一"能看见它（NULL 键被并成一组，两行就红、一行则完全不可见）。
+            WHEN order_id IS NULL        THEN 'order_id_null'
             WHEN user_id IS NULL         THEN 'user_id_null'
             -- 空日期必须显式判无效：否则它得到 reject_reason=NULL、is_valid=true，
             -- 静默进入 GMV/DWS/ADS，而"未来日期"规则也看不到它（NULL 比较恒为 false）。

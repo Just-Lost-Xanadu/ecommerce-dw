@@ -22,11 +22,13 @@ def run(
     window_start: date,
     window_end: date,
 ) -> dict:
-    for template in TEMPLATES:
-        # 删除窗口内旧行与写入新行必须在同一事务里：否则 INSERT 失败时
-        # 旧指标已经被删掉，看板会直接少一天。
-        con.execute("BEGIN TRANSACTION")
-        try:
+    # 三张指标表**整层一个事务**：旧实现是每张表各自 BEGIN/COMMIT，于是
+    # ads_daily_metrics 提交成功、ads_gmv_category_1d 失败时，对外就是"总 GMV 更新了、
+    # 品类 GMV 还是上一批"。两个看板数字互相打架，比整层失败更难发现（各步状态都是 ok）。
+    # 行数本来就小（天 × 维度），整层回滚的成本可以忽略。
+    con.execute("BEGIN TRANSACTION")
+    try:
+        for template in TEMPLATES:
             con.execute(
                 paths.render(
                     template,
@@ -35,10 +37,10 @@ def run(
                     window_end=window_end.isoformat(),
                 )
             )
-            con.execute("COMMIT")
-        except BaseException:
-            con.execute("ROLLBACK")
-            raise
+        con.execute("COMMIT")
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
 
     start, end = window_start.isoformat(), window_end.isoformat()
     n_daily = int(con.execute(

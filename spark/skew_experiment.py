@@ -98,8 +98,12 @@ WITH stage1 AS (
         SELECT
             sku_id,
             amount,
-            -- 加盐：用行号取模模拟"随机打散"，保证确定性（同一份数据结果可复现）
-            (row_number() OVER () % {buckets}) AS salt
+            -- 加盐：用 (order_id, sku_id) 的哈希取模打散。
+            -- **不能用 `row_number() OVER ()`**：DuckDB 在
+            -- preserve_insertion_order=false（本仓库 db.py 就是这么设的）时没有保证的
+            -- 行序，同一份数据两次跑会得到不同的 salt 分配——实验结论就不稳定了，
+            -- 而"确定性"恰恰是这段 SQL 注释里声称的东西。哈希只依赖行内容。
+            (hash(order_id || '|' || sku_id) % {buckets}) AS salt
         FROM dwd_order_detail
         WHERE dt BETWEEN DATE '{start}' AND DATE '{end}' AND is_valid AND is_paid
     )
@@ -194,8 +198,13 @@ def spark_experiment(warehouse: str, start: str, end: str) -> None:
     spark = (
         SparkSession.builder.appName("skew-experiment")
         .master("local[*]")
-        # 为了观察分区规模分布，分区数给小一点，长尾才看得清
-        .config("spark.sql.shuffle.partitions", str(SALT_BUCKETS))
+        # 为了观察分区规模分布，分区数给小一点，长尾才看得清。
+        # 注意这里**故意**不复用 SALT_BUCKETS：桶数（8）是"每个热点键拆成几份"，
+        # 分区数（200）是"整个 shuffle 有多少个 reducer"，两者语义无关。
+        # 旧代码把 SALT_BUCKETS 塞进 shuffle.partitions，等于把"加盐桶数"当成了
+        # Spark 的并行度——本地 8 个分区时几乎每个热点键都独占一个 task，
+        # 长尾"看起来"更平，那是并行度小造成的假象，不是加盐的功劳。
+        .config("spark.sql.shuffle.partitions", "200")
         .getOrCreate()
     )
     spark.sparkContext.setLogLevel("WARN")

@@ -1,4 +1,4 @@
-﻿# 电商用户行为与订单离线数仓
+# 电商用户行为与订单离线数仓
 
 > **测试口径（2026-11-08 复核）**：`pytest -q` → kbase-agent **40 passed**、ecommerce-dw **32 passed**、mcp-tools **30 passed**，合计 **102**。README 内的历史段落保留更早版本的 77/51/38、60/40/30、49/36/30。
 
@@ -106,7 +106,7 @@ python -m venv .venv
 
 ### 3.2 为什么去重的排序规则要显式保护"有问题的行"
 
-DWD 按 `order_id` 去重。最初写的是：
+DWD 按 `(order_id, sku_id)` 去重（早期只按 `order_id`，接入一单多品后会误压成一行，已改正）。最初写的是：
 
 ```sql
 ORDER BY _load_time DESC, amount DESC NULLS LAST   -- ❌ 有问题的写法
@@ -155,7 +155,7 @@ DWD 报出 0 行金额为空，看起来像"源数据很干净"。
 
 | 规则 | 层 | 类型 | 阻断 | 说明 |
 |---|---|---|---|---|
-| `unique_order_id` | DWD | 唯一性 | ✅ | 订单号必须唯一。**在单天分区内恒为通过**（DWD 已按 `order_id` 去重），它是防「去重逻辑被改坏」的回归护栏；跨天重复不在本规则视野内 |
+| `unique_order_id` | DWD | 唯一性 | ✅ | 订单**明细行**必须唯一（键 = `order_id + sku_id`，与 DWD 声明的粒度一致；早期误写成只按 `order_id`，接入一单多品后会把合法的一单多品判成重复并阻断下游）。**在单天分区内恒为通过**，它是防「去重逻辑被改坏」的回归护栏；跨天重复不在本规则视野内 |
 | `not_null_user_id` | DWD | 完整性 | ✅ | 有效订单必须有 user_id（在 DWD 全量行上算非空率） |
 | `positive_amount` | DWD | 值域 | ✅ | **没有任何一行可以「既被判为有效、金额又非正」**（is_valid 与 amount 必须自洽）。⚠️ 旧口径是「在 is_valid 行上算 amount > 0」，而 is_valid 已蕴含 amount > 0，属于恒真表达式，已修正 |
 | `valid_event_enum` | DWD | 值域 | ✅ | 行为事件枚举合法（漏斗依赖它） |
@@ -239,13 +239,19 @@ python -m dw.cli recon
 | **清洗后**（DWD 收口） | 96,782,831.16 | **+0.000%** |
 
 真实数据本身没有订单表，`buy` 事件被映射成订单后，再叠加 9 类可控脏数据；
-所以 3.406% 的差异可以逐项归因：**3% 退款单 + 0.3% 重复订单 + 空 user/空金额/负金额**
+所以 3.406% 的差异可以逐项归因：**约 3.3% 来自退款单与重复订单**（3% 退款 + 0.3% 重复），
+**其余约 0.1%（≈10 万元）来自 `user_id` 为空 / 金额为空 / 金额非正的无效行**
 （基准与 DWD 都用同一套去重键与 `is_valid` 口径，因此收口后差异为 0）。
 未来日期订单落在窗口外分区、ODS 不加载，因此不再制造"边界残差"。
 
 > 历史故事保留：synthetic 模式下曾用"基准漏掉 `user_id` 非空"把 0.094% 修正到 0.029%，
 > 那次教训（**一个正确的解释会盖住其他错误**）已经写进 `docs/指标口径.md` 的口径变更记录；
 > 但对外引用当前数字时，以天池数据这一节为准。
+
+`recon` 不只是报表，**它带门禁语义**：DWD 收口后 GMV 与基准的偏差超过 `--tolerance`
+（默认 0.01%）或订单数与基准不完全一致时，进程退出码为 **3**。Airflow DAG 里
+`recon` 是独立 task，所以对账不通过会直接把这条链路标红、不再往下跑 `dashboard`——
+此前 `recon` 无条件 `return 0`，GMV 差 5% 也只是打一行 stdout，DAG 全绿。
 
 ### 6.2 倾斜：真实数据是长尾（193x），不是单键热点
 
@@ -258,6 +264,10 @@ python -m dw.cli recon
   分组中位数            1
   最大 / 中位数         193.0x
 ```
+
+口径说明：这里的"参与聚合"是 **`is_valid AND is_paid`** 的订单行（96,156），
+比 DWD 层的有效行 99,126 少 **2,970 行**——差额是"有效但未支付"的行，
+它们参与 DWD 有效性口径、但不参与 GMV / 倾斜聚合。
 
 真实天池数据里单个商品最多只占 0.07%，但 69,684 个 SKU 中有大量只出现 1 次的商品，
 所以"最大 / 中位数"仍有 **193x**——这是**长尾型倾斜**，不是 synthetic 那种"一个 SKU 占 40%"
@@ -303,7 +313,7 @@ python spark/skew_experiment.py --spark   # synthetic 下实测 82,043 → 30,80
 | DIM | `dim_sku` / `dim_user` / `dim_date` | 1,090,811 / 49,395 / 9 |
 | DWD | `dwd_order_detail` | 99,363（其中有效 99,126，剔行率 0.24%） |
 | DWD | `dwd_page_log` | 4,909,521 |
-| DWD | `dwd_order_reject_audit` | 36 |
+| DWD | `dwd_order_reject_audit` | 36（粒度是 `(dt, reject_reason)` 聚合，不是行级明细） |
 | DWS | `dws_traffic_user_1d` / `dws_trade_user_1d` | 344,618 / 64,426 |
 | ADS | `ads_daily_metrics` / `ads_gmv_category_1d` / `ads_funnel_1d` | 9 / 17,724 / 27 |
 
@@ -354,7 +364,7 @@ ecommerce-dw/
 │   ├── quality.py            # 12 条质量规则 + 报告 + 阻断判定
 │   ├── checks.py             # 对账与倾斜量化
 │   └── export_dashboard.py   # 离线 HTML 看板
-├── sql/                      # 全部建表与加工 SQL（含设计理由注释）
+├── sql/                      # 全部建表与加工 SQL（12 个 .sql 产出 13 张表；含设计理由注释）
 ├── dags/                     # Airflow DAG（只做调度层，见 docs/airflow.md）
 ├── Dockerfile.airflow        # Airflow 镜像：Airflow 环境与数仓 venv 隔离
 ├── docker-compose.airflow.yml# Postgres + init + webserver + scheduler
@@ -433,7 +443,12 @@ python -m pytest -q          # 32 passed
   **对账基准也已同步改为同一去重键**，订单数按 `count(DISTINCT order_id)` 统计，避免"基准按单、DWD 按明细行"的口径漂移。
   跨天重复的同一 `order_id` 也不会被当天分区内的去重消掉——需要全局去重表或唯一约束才能真正守住。
 - **质量规则 12 条，未覆盖分布漂移与异常检测**。目前只有日环比波动这一条粗粒度监控；
-  另外 `event_date_in_window` 现在检查的是"分区日期 vs 业务日期"，不再是恒真表达式；`source_days_within_boundary` 仅扫描订单分区，未来日期的日志分区仍不在它的覆盖范围内。
+  另外 `event_date_in_window` 现在检查的是"分区日期 vs 业务日期"，不再是恒真表达式；
+  `source_days_within_boundary` **两张源表的分区都扫**（`order_info_*.csv` 与 `user_log_*.csv`），
+  此前只扫订单分区，日志里的超前后缀分区不会被发现——规则名说的是"源分区文件"，就必须两张都数。
+- **`ads_gmv_category_1d` 不做"零订单日补零"**：某天完全没有订单时，`ads_daily_metrics` 有那一天的行（GMV=0），
+  品类表没有。补零要把 `dim_date` × 全量类目叉乘，行数从 17,724 涨到一个量级更大的组合，而且"零订单日"
+  在真实数据里只会出现在窗口边缘。看板与对账都按 `left join` 处理，不假设两表日期集合相等。
 - **未做数据血缘可视化**，血缘只体现在 `_source_file` / `_batch_id` 两个元数据列上。
 - **维度不做拉链表（SCD2）**，全量覆盖。需要历史状态回溯时见 [`docs/扩展方向.md`](docs/扩展方向.md)。
 - **无鉴权、无多用户隔离**：本项目是单机演示，`data/` 目录即全部边界。
