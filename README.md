@@ -293,6 +293,9 @@ python -m dw.cli gen --source synthetic
 python spark/skew_experiment.py --spark   # synthetic 下实测 82,043 → 30,806（6.86x → 2.41x）
 ```
 
+> 另：`spark/spark_sql_recon.py` 用 Spark SQL 重写了交易侧 DWD→DWS→ADS（GMV / 订单数 / 支付用户），
+> 并与 DuckDB 的 `ads_daily_metrics` 逐日对账：9 天差异全为 0，DWD 行数（99,363 / 有效 99,126）也一致。
+
 > 实现上有个踩过的坑：Spark 侧加盐用的是带种子的 `rand()`，**不是** `row_number() OVER (ORDER BY sku_id)`。
 > 后者会触发 `No Partition Defined for Window operation! Moving all data to a single partition`。
 > 另：Windows 下若项目路径含中文，`bin/spark-submit.cmd` 会把 classpath 传坏并报
@@ -370,6 +373,7 @@ ecommerce-dw/
 ├── Dockerfile.airflow        # Airflow 镜像：Airflow 环境与数仓 venv 隔离
 ├── docker-compose.airflow.yml# Postgres + init + webserver + scheduler
 ├── spark/skew_experiment.py  # 倾斜对照实验（可选，见该文件说明）
+├── spark/spark_sql_recon.py  # Spark SQL 最小主链路（DWD→DWS→ADS）与 DuckDB 对账
 ├── Dataset/                  # 天池 CSV（3.6GB，本地，不入库；也可放 data/）
 ├── tests/                    # 32 项测试
 ├── docs/                     # 指标口径 / 数据字典
