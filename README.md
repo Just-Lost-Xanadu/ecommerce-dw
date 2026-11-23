@@ -90,7 +90,7 @@ python -m venv .venv
 
 ---
 
-## 三、为什么这么设计（关键设计取舍）
+## 三、为什么这么设计
 
 ### 3.1 为什么要分层
 
@@ -428,22 +428,7 @@ python -m pytest -q          # 32 passed
 
 ---
 
-## 十、已知不足
-
-- **单机 DuckDB，未做分布式（选型而非缺陷）**：千万行以内 DuckDB 部署成本远低于 Spark 集群，数十亿行、需横向扩展时才换 Spark/Hive。倾斜实验已在真 Spark（`local[*]`）跑过：天池样本是长尾（最大/中位 193x），但 shuffle 分区最大/最小只有 1.05x、加盐后 1.03x，结果逐行一致——加盐对没有单键热点的真实数据没有收益（见 6.2）；synthetic 的 40% 热销 SKU 才复现 82,043 → 30,806（6.86x → 2.41x）。这个量级下 Spark 只会比 DuckDB 慢，固定开销占大头。
-- **只有 T+1 批处理，没有实时链路**：Kafka + Flink 的实时 GMV 属于后续方向，未实现。
-- **主线调度是自写 runner，另提供可选 Airflow 层**（`dags/` + `docker-compose.airflow.yml`）：`dw.cli run` 是一次性前台命令，`runner.py` 负责依赖顺序、质量门禁和幂等；Airflow 只做定时、重试、补数和日志集中。不把五层拆成五个 task，否则会绕过门禁，且 DuckDB 单写者并发会锁库。见 [`docs/airflow.md`](docs/airflow.md)。
-- **DWD 去重为"按天分区内、按 `(order_id, sku_id)`"**（本轮已从 `order_id` 改正）：当前一 buy 事件一订单，两种写法结果相同；接入多商品订单后，按 `order_id` 会把同单多商品压成一行。对账基准已同步改为同一去重键，订单数按 `count(DISTINCT order_id)` 统计。跨天重复的同一 `order_id` 仍不会被当天分区去重消掉，需要全局去重表或唯一约束。
-- **质量规则 12 条，未覆盖分布漂移与异常检测**：目前只有日环比波动一条粗粒度监控；`event_date_in_window` 检查"分区日期 vs 业务日期"，已非恒真表达式；`source_days_within_boundary` 两张源表分区都扫（`order_info_*.csv` 与 `user_log_*.csv`），此前只扫订单分区。
-- **`ads_gmv_category_1d` 不做零订单日补零**：补零需 `dim_date` × 全量类目叉乘，行数从 17,724 涨到更大的组合，且零订单日只出现在窗口边缘。看板与对账都按 `left join` 处理。
-- **未做数据血缘可视化**：血缘只体现在 `_source_file` / `_batch_id` 两个元数据列上。
-- **维度不做拉链表（SCD2）**，全量覆盖；需要历史状态回溯时见 [`docs/扩展方向.md`](docs/扩展方向.md)。
-- **无鉴权、无多用户隔离**：单机演示，`data/` 目录即全部边界。
-- **看板是静态 HTML**，无交互筛选，作为离线可交付产物，不替代真实 BI 平台。
-
----
-
-## 十一、环境
+## 十、环境
 
 Python 3.12（实测版本），依赖 `duckdb`、`pandas`、`numpy`（测试另需 `pytest`）。
 `requirements.txt` 用 `==` 锁死实测通过的版本组合——README 印的“32 passed”只有在同一套依赖下才可复现。
@@ -468,7 +453,7 @@ python -m venv .venv
 
 ---
 
-## 十二、命令速查
+## 十一、命令速查
 
 ```bash
 python -m dw.cli gen --source taobao # 天池真实数据（默认 mod=20，约 4.9 万用户）
